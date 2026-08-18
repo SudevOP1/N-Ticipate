@@ -1,0 +1,22 @@
+# --- core / used from Phase 1 onward ---
+pyyaml>=6.0
+nltk>=3.8
+numpy>=1.26
+tqdm>=4.66
+
+# --- Phase 2/3: evaluation, notebooks ---
+matplotlib>=3.8
+pandas>=2.2
+jupyter>=1.0
+
+# --- Phase 5: regional language (Devanagari) ---
+indic-nlp-library>=0.92
+
+# --- Phase 7: desktop app (Windows) ---
+pystray>=0.19
+pynput>=1.7
+Pillow>=10.0
+pywin32>=306 ; platform_system == "Windows"
+
+# --- testing ---
+pytest>=8.0

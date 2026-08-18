@@ -1,0 +1,85 @@
+# N-Ticipate configuration
+# Every phase reads from this file instead of hardcoding paths/params,
+# so experiments (Phase 2 smoothing sweeps, Phase 5 language switch, etc.)
+# are just config edits, not code edits.
+
+project:
+  name: "N-Ticipate"
+  seed: 42               # fixed seed for reproducible train/dev/test splits
+
+paths:
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"
+  models_dir: "data/models"
+
+# ---------------------------------------------------------------------------
+# Phase 1: preprocessing
+# ---------------------------------------------------------------------------
+preprocessing:
+  corpora_english: ["brown", "gutenberg", "reuters"]   # nltk corpus ids
+  min_token_freq: 2        # below this -> <UNK>
+  lowercase_for_counts: true
+  keep_stopwords: true      # deliberately true -- see report/notes.md
+  keep_punctuation: true
+  train_split: 0.8
+  dev_split: 0.1
+  test_split: 0.1
+
+# ---------------------------------------------------------------------------
+# Phase 2: n-gram language model
+# ---------------------------------------------------------------------------
+ngram:
+  orders: [1, 2, 3]                # unigram, bigram, trigram
+  smoothing: "stupid_backoff"      # one of: mle | laplace | stupid_backoff | kneser_ney
+  add_k: 0.5                       # used only when smoothing == laplace
+  backoff_alpha: 0.4                # used only when smoothing == stupid_backoff
+  kn_discount: 0.75                 # used only when smoothing == kneser_ney
+  prune_min_count: 2                # drop n-grams seen fewer than this many times
+  prune_top_k_per_context: 10       # keep only top-k continuations per context
+
+# ---------------------------------------------------------------------------
+# Phase 3: prediction engine / personalization
+# ---------------------------------------------------------------------------
+predictor:
+  top_k: 5
+  personalization:
+    enabled: true
+    lambda_start: 0.05     # weight on user model when little data exists
+    lambda_max: 0.4        # cap as user data accumulates
+    min_user_tokens: 200    # below this, lambda stays at lambda_start
+
+# ---------------------------------------------------------------------------
+# Phase 4 / 5: HMM POS tagging
+# ---------------------------------------------------------------------------
+hmm:
+  english:
+    corpus: "treebank"       # nltk.corpus.treebank tagged_sents
+    tagset: "universal"      # universal | penn
+  regional:
+    language: "hindi"        # hindi | marathi
+    corpus: "indian"         # nltk.corpus.indian
+    file: "hindi.pos"        # or marathi.pos
+  unknown_word_strategy: "suffix_heuristics"
+  laplace_smoothing_emissions: 1.0   # add-1 smoothing on emission counts
+
+# ---------------------------------------------------------------------------
+# Phase 6: POS-aware reranking
+# ---------------------------------------------------------------------------
+reranker:
+  enabled: true
+  alpha: 0.3     # weight of log P(tag | tag_context) in the combined score
+
+# ---------------------------------------------------------------------------
+# Phase 7: desktop app
+# ---------------------------------------------------------------------------
+app:
+  debounce_ms: 50
+  overlay:
+    anchor: "caret"          # caret | cursor | fixed_corner
+    fallback_anchor: "cursor"
+  hotkeys:
+    accept: "tab"
+    dismiss: "esc"
+    cycle_next: "ctrl+right"
+  disable_on_password_fields: true
+  local_only: true            # no network calls, ever
