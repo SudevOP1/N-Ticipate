@@ -70,6 +70,12 @@ prediction:
   candidate_pool: 50 # candidates generated before reranking
   score_floor: -30.0 # log-prob floor, avoids -inf in ranking
 
+  # Punctuation is kept in the language model on purpose (it predicts well),
+  # but as a *suggestion* "." is useless -- the user can type it faster than
+  # they can read it. Off by default so the Phase 3 metrics measure the model
+  # itself; Phase 7 turns it on for display.
+  suggest_punctuation: true
+
   personalization:
     enabled: true
     lambda_max: 0.4 # ceiling on the user-model interpolation weight

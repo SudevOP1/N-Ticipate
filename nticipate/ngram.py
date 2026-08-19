@@ -44,6 +44,11 @@ SMOOTHING_METHODS = ("mle", "laplace", "stupid_backoff", "kneser_ney")
 #: vocabulary. Perplexity is only strictly meaningful for these.
 NORMALIZED_METHODS = ("mle", "laplace", "kneser_ney")
 
+#: How many of the most frequent unigrams to keep for the last backoff level
+#: of candidate generation. Beyond a few hundred, a word is never going to win
+#: a top-k ranking anyway, so scoring the rest is pure cost.
+TOP_UNIGRAMS = 500
+
 
 @dataclass
 class ModelStats:
@@ -108,6 +113,8 @@ class NgramModel:
         # ("the",) has thousands -- far too slow for the app's ~50 ms budget.
         self.totals: dict[int, dict[Context, int]] = {}
         self.cont_totals: dict[int, dict[Context, int]] = {}
+        # Most frequent unigrams, precomputed for the final backoff level.
+        self.top_unigrams: list[str] = []
         self.vocab: set[str] = set()
         self.total_tokens = 0
         self.pruned = False
@@ -166,6 +173,11 @@ class NgramModel:
             k: {ctx: sum(counter.values()) for ctx, counter in table.items()}
             for k, table in self.continuations.items()
         }
+        skip = {self.bos, self.unk}
+        self.top_unigrams = [
+            w for w, _ in self.counts[1].get((), Counter()).most_common(TOP_UNIGRAMS)
+            if w not in skip
+        ]
 
     # ------------------------------------------------------------- scoring
 
@@ -335,17 +347,25 @@ class NgramModel:
         model is there to learn.
         """
         blocked = set(exclude) | {self.bos, self.unk}
+        target = k * 5
         seen: dict[str, float] = {}
         for order in range(self.order, 0, -1):
             ctx = self._context_for(context, order)
             counter = self.counts[order].get(ctx)
             if not counter:
                 continue
-            for word in counter:
+            # The unigram table is the whole vocabulary -- tens of thousands of
+            # entries. Iterating it (and scoring every entry) is what turns a
+            # sub-millisecond call into a 100 ms one, so the final backoff
+            # level reads from a precomputed top-N list instead.
+            source = self.top_unigrams if order == 1 else counter
+            for word in source:
                 if word in blocked or word in seen:
                     continue
                 seen[word] = self.prob(word, context)
-            if len(seen) >= k * 5:
+                if len(seen) >= target:
+                    break
+            if len(seen) >= target:
                 break
         ranked = sorted(seen.items(), key=lambda kv: (-kv[1], kv[0]))
         return ranked[:k]

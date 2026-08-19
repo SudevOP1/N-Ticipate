@@ -159,7 +159,110 @@ perplexity-by-order and size-vs-quality plots).
 
 ## Phase 3 — Prediction engine
 
-_(hit@1/3/5, keystroke savings, p50/p95 latency)_
+Built on the Phase 2 pruned trigram model (stupid backoff, 151,014 n-grams).
+Evaluated on the Brown dev split.
+
+Ranking is shared by both modes so there is one policy, not two that drift:
+
+    score(w) = lambda * P_user(w | h) + (1 - lambda) * P_base(w | h)
+
+Caveat stated plainly in the write-up: the base model uses stupid backoff,
+whose scores are unnormalised, so this mixes two unnormalised scores. It is a
+ranking heuristic, not a probabilistic mixture — fine for ranking, but not
+something to write as `P(w|h)` without the qualification.
+
+### Accuracy
+
+| Evidence available          | hit@1 | hit@3 | hit@5 |
+| --------------------------- | ----: | ----: | ----: |
+| Next-word (0 chars typed)   | 16.7% | 29.0% | 34.8% |
+| Completion, 1 char typed    | 34.6% | 48.2% | 53.0% |
+| Completion, 2 chars typed   | 40.2% | 53.6% | 58.8% |
+| Completion, 3 chars typed   | 46.1% | 65.5% | 74.3% |
+
+10,105 next-word positions; 3,024–5,210 completion positions per prefix length.
+`<UNK>` targets excluded — the predictor is designed never to suggest `<UNK>`,
+so scoring those positions would report misses for reasons unrelated to model
+quality.
+
+### Keystroke savings — the headline product number
+
+| Metric                    | Value  |
+| ------------------------- | -----: |
+| Words simulated           |  6,022 |
+| Suggestion accepted       |  82.0% |
+| Keystrokes typed          | 18,502 |
+| Keystrokes without app    | 31,050 |
+| **Savings**               | **40.4%** |
+
+Simulation: typing a word costs one keystroke per character plus a space;
+accepting costs characters-typed-so-far plus one accept key. A suggestion is
+only taken when it actually saves a keystroke — accepting a 3-letter word after
+typing 2 letters saves nothing and no real user would do it.
+
+### Latency
+
+| Mode       | mean | p50  | p95  | p99  |
+| ---------- | ---: | ---: | ---: | ---: |
+| Next-word  | 0.66 | 0.65 | 0.72 | 1.22 |
+| Completion | 0.47 | 0.43 | 1.08 | 1.68 |
+
+(milliseconds; budget is p95 <= 50 ms, so ~70x inside it)
+
+Trie: 24,634 words in 68,106 nodes. Character-based, so Phase 5's Devanagari
+works with no changes (`भार` → `भारत`, `भारतीय` verified in tests).
+
+### Personalisation ablation
+
+User text using vocabulary Brown has never seen (project names, jargon),
+492 tokens observed, evaluated on 3 held-out sentences of the same kind:
+
+|              | hit@1 | hit@3 | hit@5 | savings |
+| ------------ | ----: | ----: | ----: | ------: |
+| Base only    |  6.7% |  6.7% |  6.7% |   14.9% |
+| Personalised | 33.3% | 46.7% | 60.0% |   67.3% |
+
+Qualitative:
+
+| Context      | Base                          | Personalised                |
+| ------------ | ----------------------------- | --------------------------- |
+| `vit`        | vital, vitality, vitally      | **viterbi**, vital, vitality |
+| `ntic`       | *(nothing)*                   | **nticipate**               |
+| `nticipate ` | the, `,`, `.`                 | uses, suggests, the         |
+
+`ntic` returns **nothing** from the base model — the word is not in Brown, so no
+amount of good language modelling can produce it. Only the profile can.
+
+The non-obvious part: lambda is only **0.04** at 492 tokens, yet rankings flip
+completely. Not a contradiction — for these words `P_base` is effectively zero,
+so a small weight on a non-zero user score dominates. The interpolation does not
+need to be aggressive to capture new vocabulary, which is why the cap can stay
+conservative (0.4) and protect ordinary English.
+
+### Bug found
+
+`NgramModel.candidates()` walked the **entire** unigram table at the final
+backoff level — 24,636 words scored per call. Hidden in Phase 2 because with
+`k=3` the quota (`k*5`) was met by the higher orders; it only appeared when
+Phase 3 raised the candidate pool to 50, at which point evaluation went from
+seconds to over ten minutes. The last backoff level now reads a precomputed
+top-500 unigram list, and the quota check moved inside the word loop.
+
+### Defect recorded, not silently patched
+
+Next-word suggestions after `is building` are `.`, `,`, `of`. The model is not
+wrong — punctuation genuinely follows most often — but as a *suggestion* `.` is
+useless: the user types it faster than they can read it. Keeping punctuation in
+the language model remains correct (Phase 1's argument stands). This is a
+display policy, so it is an opt-in flag (`prediction.suggest_punctuation`),
+default on, which Phase 7 turns off. All metrics above were measured with the
+filter off so they describe the model, not a filter over it.
+Filtered: `is building` → of, a, on, and.
+
+Tests: 322 passing, 1 skipped
+(`test_trie.py`, `test_userprofile.py`, `test_predictor.py`).
+Deliverable notebook: `notebooks/03_prediction_engine.ipynb` (executed, with
+the accuracy-vs-evidence and lambda-growth plots).
 
 ## Phase 4 — HMM tagger, English
 
