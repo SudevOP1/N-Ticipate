@@ -65,7 +65,97 @@ and coverage plots).
 
 ## Phase 2 — N-gram model
 
-_(perplexity table across order x smoothing, model sizes, pruning trade-off)_
+Trained on the Phase 1 Brown split (45,610 train sentences, vocab 24,634).
+Perplexity measured on the dev split (5,701 sentences).
+
+### Perplexity: order x smoothing
+
+|   n | MLE      | Laplace | Stupid backoff\* | Kneser-Ney |
+| --: | -------- | ------: | ---------------: | ---------: |
+|   1 | 700.4    |   703.5 |            700.4 |      700.4 |
+|   2 | infinite | 1,701.7 |            222.2 |      238.4 |
+|   3 | infinite | 9,704.3 |            291.3 |  **221.1** |
+
+\* Stupid backoff is not a probability distribution — measured mass over the
+vocabulary after "the" is **1.306**, not 1.0. Its scores rank correctly, which
+is all the app needs, but the number in that column is not a perplexity in the
+same sense as the others. The model exposes this as `is_normalized` rather than
+printing the figure silently.
+
+N-gram counts: 24,636 unigrams, 360,323 bigrams, 1,050,690 trigrams.
+
+Three findings worth the write-up:
+
+1. **MLE is infinite for n > 1**, finite at n = 1. The unigram case is finite
+   only because Phase 1 closed the vocabulary — every dev token is known or
+   already `<UNK>`. Add context and unseen n-grams appear immediately.
+2. **Laplace gets worse as order rises** (704 → 1,702 → 9,704). Add-1 hands a
+   pseudo-count to each of ~24,600 vocabulary items for *every* context, and
+   trigram contexts are mostly seen once or twice, so smoothing mass swamps
+   the evidence. The textbook method is the worst performer at the order we
+   want to ship.
+3. **Only Kneser-Ney improves at n = 3** (238 → 221).
+
+### Continuation counts (why KN works)
+
+| word      | frequency | distinct predecessors |
+| --------- | --------: | --------------------: |
+| angeles   |        36 |                     1 |
+| francisco |        30 |                     3 |
+| york      |       252 |                     6 |
+| time      |     1,284 |                   206 |
+| said      |     1,567 |                   397 |
+
+### Pruning: size vs. quality (trigram, dev perplexity)
+
+| min_count | max_cont | n-grams   | size MB | Stupid backoff | Kneser-Ney |
+| --------: | -------: | --------: | ------: | -------------: | ---------: |
+|         1 |        0 | 1,050,690 |    14.7 |          291.3 |  **221.1** |
+|         2 |       50 |   151,014 |     2.3 |      **502.7** |      680.1 |
+|         2 |       20 |   138,953 |     2.2 |      **570.5** |      918.2 |
+|         3 |       20 |    79,295 |     1.2 |      **664.7** |    1,281.9 |
+|         5 |       10 |    47,205 |     0.8 |      **885.5** |    2,336.2 |
+
+**The two rankings disagree, and that decides what ships.** Unpruned, KN wins
+(221 vs 291). Pruned to a shippable size, KN loses and degrades roughly three
+times faster. The cause is structural: KN's estimates are built on continuation
+counts, and pruning deletes exactly the rare single-occurrence n-grams those
+counts come from. Stupid backoff only ever needed raw counts plus a fallback
+path, so it degrades gracefully.
+
+Shipped model: trigram, stupid backoff, `min_count=2`, `max_continuations=50`.
+14.7 MB → 2.26 MB (6.5x), 1,050,690 → 151,014 n-grams.
+`data/models/ngram_trigram_pruned.pkl`.
+
+### Latency
+
+`candidates()` on the pruned model: **p50 0.20 ms, p95 0.36 ms** — two orders of
+magnitude inside the 50 ms budget. Achieved by caching context totals; the
+naive `sum(counter.values())` per query is O(continuations) and a context like
+`("the",)` has thousands.
+
+### Sample generations (stupid backoff, truecased)
+
+- n=1: `Spirit lead were at ? in authority by then ( Amen still and board there`
+- n=2: `however , you are scientific laboratories , and the skies , brass bar on those who takes`
+- n=3: `Things like the epithets must reasonably be ascribed to the Gothic or <UNK> religion are concerned`
+
+The jump from order 1 to 3 is the clearest qualitative evidence in the project
+that the model learned structure: bag of words → local grammar → near-parsing
+clauses.
+
+### Bug found
+
+`candidates()` ranked `<UNK>` **first** after `in the`. It is a frequent class
+even though each member is rare, so suggesting it is nonsense — the app would
+literally offer the user "<UNK>". Now excluded alongside the boundary markers.
+After the fix: `in the` → world / first / United / same / past;
+`i would like to` → think / be / know / do.
+
+Tests: 226 passing, 1 skipped (MLE has no mass on an unseen context, so its
+normalisation check is not applicable).
+Deliverable notebook: `notebooks/02_ngram_models.ipynb` (executed, with the
+perplexity-by-order and size-vs-quality plots).
 
 ## Phase 3 — Prediction engine
 

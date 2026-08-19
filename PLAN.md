@@ -261,7 +261,7 @@ editor-window fallback still delivers every required NLP component.
 | ----- | ------------------------ | ----------- |
 | 0     | Scaffolding              | **done**    |
 | 1     | Preprocessing            | **done**    |
-| 2     | N-gram model             | not started |
+| 2     | N-gram model             | **done**    |
 | 3     | Prediction engine        | not started |
 | 4     | HMM tagger, English      | not started |
 | 5     | HMM tagger, Hindi        | not started |
