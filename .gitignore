@@ -1,0 +1,28 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Trained models and corpora are rebuilt by setup_env.py + the notebooks.
+data/models/*
+!data/models/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+
+# Never commit anything derived from the user's own typing (Phase 3/7).
+user_profile.json
+*.log
+
+build/
+dist/
+*.spec
+
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,21 @@
+# --- core NLP (Phases 1-6) ---
+nltk>=3.8
+numpy>=1.26
+PyYAML>=6.0
+
+# --- desktop app (Phase 7, Windows) ---
+pynput>=1.7          # global keystroke hook + injection
+pystray>=0.19        # system tray icon
+Pillow>=10.0         # tray icon rendering
+
+# --- notebooks / deliverables ---
+jupyter>=1.0
+matplotlib>=3.8
+pandas>=2.0
+
+# --- dev ---
+pytest>=8.0
+
+# --- optional ---
+# indic-nlp-library   # better Devanagari normalization (Phase 5)
+# pyinstaller>=6.0    # single-exe packaging (Phase 8)

@@ -1,0 +1,150 @@
+# N-Ticipate configuration
+#
+# Every tunable parameter for every phase lives here, so no phase ever
+# hardcodes a magic number. Read via nticipate.config.load_config().
+# Paths are relative to the project root unless absolute.
+
+project:
+  name: N-Ticipate
+  version: 0.1.0
+
+paths:
+  data_raw: data/raw
+  data_processed: data/processed
+  models: data/models
+  user_profile: data/models/user_profile.json
+  report: report
+
+# ---------------------------------------------------------------- Phase 1
+preprocessing:
+  # Language modelling keeps stopwords and punctuation on purpose:
+  # "of the" is exactly what a bigram model needs to predict.
+  remove_stopwords: false
+  remove_punctuation: false
+
+  lowercase_for_counts: true # count case-insensitively ...
+  truecase_output: true # ... then restore natural casing on suggestion
+
+  tokenizer: nltk # nltk | regex  (regex works with no corpora downloaded)
+  sentence_splitter: punkt # punkt | regex
+
+  min_token_freq: 2 # tokens rarer than this become <UNK>
+  max_vocab_size: 50000 # 0 = unlimited
+  unk_token: "<UNK>"
+  bos_token: "<s>"
+  eos_token: "</s>"
+
+  min_sentence_tokens: 2 # drop shorter sentences from training
+  strip_urls: true
+  strip_emails: true
+  normalize_unicode: NFC # also handles Devanagari for Phase 5
+
+  split:
+    train: 0.8
+    dev: 0.1
+    test: 0.1
+    seed: 42
+
+# ---------------------------------------------------------------- Phase 2
+ngram:
+  max_order: 3 # 1 = unigram, 2 = bigram, 3 = trigram
+  # mle | laplace | stupid_backoff | kneser_ney
+  smoothing: stupid_backoff
+  laplace_k: 1.0 # add-k value when smoothing == laplace
+  backoff_alpha: 0.4 # stupid-backoff discount per level dropped
+  kneser_ney_discount: 0.75
+
+  pruning:
+    enabled: true
+    min_count: 2 # drop n-grams seen fewer times
+    max_continuations: 50 # cap successors stored per context
+
+  corpus:
+    english: brown # nltk corpus name, or a path under data/raw
+    fallback_file: data/raw/sample_english.txt
+
+# ---------------------------------------------------------------- Phase 3
+prediction:
+  max_suggestions: 3
+  min_prefix_len: 1 # keystrokes before completion mode fires
+  candidate_pool: 50 # candidates generated before reranking
+  score_floor: -30.0 # log-prob floor, avoids -inf in ranking
+
+  personalization:
+    enabled: true
+    lambda_max: 0.4 # ceiling on the user-model interpolation weight
+    lambda_growth_tokens: 5000 # tokens of user text to reach lambda_max
+    max_user_tokens: 200000 # ring-buffer cap on stored user text
+    # The user's own vocabulary is deliberately never <UNK>-ed:
+    # capturing names and jargon is the whole point.
+
+  latency:
+    debounce_ms: 50
+    p95_budget_ms: 50
+
+# ------------------------------------------------------------- Phases 4-5
+hmm:
+  language: english # english | hindi   (same HMMTagger class for both)
+  tagset: universal # universal | penn
+  smoothing_k: 1.0 # Laplace on transition + emission matrices
+  use_log_space: true # log-space Viterbi, guards underflow
+  unknown_word_strategy: suffix # suffix | uniform | most_frequent_tag
+
+  cross_check_with_nltk: false # NLTK HMM used as a correctness check only,
+  # never in the shipped prediction path
+
+  corpora:
+    english: data/raw/sample_tagged_english.conll
+    hindi: data/raw/sample_tagged_hindi.conll
+    english_nltk: treebank # preferred when the corpus is downloaded
+    hindi_nltk: indian
+
+  split:
+    train: 0.8
+    test: 0.2
+    seed: 42
+
+# ---------------------------------------------------------------- Phase 6
+reranking:
+  enabled: true
+  alpha: 0.3 # weight on the POS term; alpha = 0 must reproduce Phase 3
+  tag_context_size: 2 # preceding tags conditioned on
+  unknown_tag_penalty: -2.0
+
+# ---------------------------------------------------------------- Phase 7
+app:
+  enabled_on_start: true
+  language: english
+
+  hotkeys:
+    accept: tab
+    dismiss: esc
+    toggle: "<ctrl>+<alt>+n"
+
+  overlay:
+    max_items: 3
+    font_size: 11
+    offset_x: 4
+    offset_y: 20
+    theme: dark # dark | light
+
+  capture:
+    context_reset_keys: [enter, tab, escape]
+    max_context_words: 2 # trigram model needs only the last two
+    injection_method: type # type | clipboard
+
+  privacy:
+    # Hard requirements, not preferences. Nothing leaves the machine.
+    disable_in_password_fields: true
+    log_keystrokes_to_disk: false
+    telemetry: false
+
+# ---------------------------------------------------------------- Phase 8
+evaluation:
+  hit_at_k: [1, 3, 5]
+  latency_percentiles: [50, 95]
+  report_file: report/notes.md
+
+logging:
+  level: INFO
+  file: "" # empty = console only
