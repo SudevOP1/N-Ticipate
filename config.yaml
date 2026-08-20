@@ -92,9 +92,15 @@ prediction:
 hmm:
   language: english # english | hindi   (same HMMTagger class for both)
   tagset: universal # universal | penn
-  smoothing_k: 1.0 # Laplace on transition + emission matrices
+  # Laplace on transition + emission matrices. NOT 1.0: add-one puts more mass
+  # on the smoothing term than on the counts at this vocabulary size and drops
+  # the tagger below the most-frequent-tag baseline. Swept in notebook 04;
+  # 0.01 is on the plateau.
+  smoothing_k: 0.01
   use_log_space: true # log-space Viterbi, guards underflow
   unknown_word_strategy: suffix # suffix | uniform | most_frequent_tag
+  unknown_prior: hapax # hapax | laplace -- P(tag | unseen word) estimated
+  # from the words seen exactly once
 
   cross_check_with_nltk: false # NLTK HMM used as a correctness check only,
   # never in the shipped prediction path

@@ -266,7 +266,153 @@ the accuracy-vs-evidence and lambda-growth plots).
 
 ## Phase 4 — HMM tagger, English
 
-_(accuracy vs. most-frequent-tag baseline, confusion matrix, hand trellis)_
+Corpus: NLTK Penn Treebank sample, universal (12-tag) tagset. 3,914 sentences,
+100,676 tokens. Split 80/20, seed 42 → 3,131 train / 783 test (19,655 test
+tokens). Model: bigram HMM, Laplace-smoothed initial / transition / emission
+matrices, log-space Viterbi, all from scratch.
+
+The universal tagset rather than the full 45-tag Penn set is deliberate: Phase
+6 only needs noun-ish vs. verb-ish to rerank, and 45 tags would spread the same
+training data over nearly four times the transition parameters.
+
+### Headline accuracy
+
+| Tagger                    |    all |   seen | unseen |
+| ------------------------- | -----: | -----: | -----: |
+| **HMM (Viterbi)**         | **95.39%** | 96.98% | 74.77% |
+| Most-frequent-tag baseline | 92.74% | 96.21% | 47.83% |
+
+OOV rate on the test set: **7.16%**. Improvement over baseline: +2.65 points,
+which is a 36.5% cut in error rate. Both taggers use the same definition of
+"seen" (exact form or lowercased form in training) so the unseen columns
+compare like for like.
+
+Nearly all of the gain is on unseen words — the baseline is very hard to beat
+on words it has memorised, which is the honest reading of that table.
+
+### The smoothing k finding — worth a paragraph in the write-up
+
+Add-one is the textbook default and is measurably the wrong value here. With
+~11k vocabulary types the `k·(V+1)` term dominates the emission denominator,
+flattens every row, and the from-scratch HMM ends up *below* the baseline it is
+supposed to beat.
+
+|      k | accuracy |  seen | unseen |
+| -----: | -------: | ----: | -----: |
+|    1.0 |   91.43% | 92.73% | 74.48% |
+|    0.1 |   95.18% | 96.76% | 74.70% |
+| **0.01** | **95.39%** | 96.98% | 74.77% |
+|  0.001 |   95.41% | 97.00% | 74.77% |
+|  1e-05 |   95.41% | 97.00% | 74.77% |
+
+Shipped at `k = 0.01` (`hmm.smoothing_k`), on the plateau. The result looks
+exactly like a Viterbi bug and is not one — worth saying, because that is the
+first place anyone would look.
+
+### Unseen words: prior × strategy ablation
+
+Two orthogonal knobs. The **prior** is what an unseen word looks like before
+its spelling is considered (`hapax` estimates `P(tag | unseen)` from words seen
+exactly once, then divides out `P(tag)` by Bayes; `laplace` uses the smoothing
+floor). The **strategy** is what the spelling adds (`suffix` morphology,
+`most_frequent_tag`, or `uniform` = nothing).
+
+| prior   | strategy          | accuracy | unseen |
+| ------- | ----------------- | -------: | -----: |
+| hapax   | **suffix**        | **95.39%** | **74.77%** |
+| hapax   | uniform           |   94.52% | 62.69% |
+| hapax   | most_frequent_tag |   93.96% | 55.15% |
+| laplace | suffix            |   94.98% | 69.23% |
+| laplace | uniform           |   92.95% | 40.51% |
+| laplace | most_frequent_tag |   94.05% | 56.08% |
+
+Reading: the hapax prior alone takes unseen-word accuracy 40.5% → 62.7%; the
+suffix rules alone take it 40.5% → 69.2%; together 74.8%. The prior is the
+cheaper of the two (a count, no linguistic knowledge) and transfers to Phase 5
+unchanged, while the suffix rules are the part that needs a Devanagari branch.
+
+`seen` accuracy is identical (96.95–97.00%) across all six rows, as it must be
+— both knobs only touch out-of-vocabulary words. A column that moved there
+would mean a knob was leaking into the rest of the model.
+
+### Log space is not optional
+
+Linear-space Viterbi is implemented alongside the log-space one purely to
+measure this. On Treebank text the best-path probability drops below float64's
+smallest normal and hits exactly `0.0` at **125 tokens**. Past that point every
+path scores zero, `argmax` returns index 0, and the tagger emits one tag for
+the whole sentence — a confidently wrong answer, not a degraded one. A
+paragraph pasted into the Phase 7 app is well past that limit.
+
+### Correctness
+
+Viterbi is checked against **exhaustive enumeration** of every tag sequence on
+short inputs (27 sequences for a 3-token, 3-tag case), in both the notebook and
+`tests/test_hmm.py`. That is the real check.
+
+NLTK's `HiddenMarkovModelTrainer`, trained on the identical split and evaluated
+on 200 OOV-free test sentences (3,728 tokens): **90.08%**, against **96.94%**
+for this implementation on the same sentences. Report this carefully — NLTK's
+`train_supervised` defaults to a near-unsmoothed emission estimator, so the gap
+says something about its defaults and nothing about whether this decoder is
+correct. Restricting to OOV-free sentences at least isolates the decoder from
+the unknown-word policy.
+
+### Per-tag accuracy and errors
+
+| Tag  | Accuracy |     n |
+| ---- | -------: | ----: |
+| ADJ  |   0.846  | 1,256 |
+| ADV  |   0.901  |   648 |
+| VERB |   0.931  | 2,676 |
+| PRT  |   0.942  |   639 |
+| NUM  |   0.947  |   647 |
+| X    |   0.948  | 1,263 |
+| DET  |   0.964  | 1,699 |
+| NOUN |   0.965  | 5,665 |
+| ADP  |   0.967  | 1,933 |
+| CONJ |   0.998  |   434 |
+| PRON |   0.998  |   535 |
+| .    |   1.000  | 2,260 |
+
+Most common confusions: VERB→NOUN (133), ADJ→NOUN (98), NOUN→ADJ (97),
+NOUN→VERB (88), DET→ADP (43).
+
+The errors sit exactly where English is genuinely ambiguous. ADJ/NOUN is
+noun-modifying-noun ("the **oil** price") against true adjectives; NOUN/VERB is
+the `-ing`/`-ed` forms and the large class of words that are both ("the
+**runs**" vs. "he **runs**"). Closed-class tags are essentially solved, being
+short lists of unambiguous frequent words.
+
+Visible in the demo output: *The quick brown fox **jumps** over…* tags `jumps`
+as NOUN. It is a known word, so no heuristic is at fault — noun-noun sequences
+are common enough in newspaper text that the transitions prefer one there.
+
+Implication for Phase 6, stated before the ablation is run: the reranker will
+be most confident exactly where tags are unambiguous, and that is where it adds
+least. The cases where it could help most are the ones where it is least
+reliable. A small or mixed effect in Phase 6 would be consistent with this, not
+a surprise.
+
+### Cost
+
+| Measure           | Value |
+| ----------------- | ----: |
+| Training          | 0.06 s over 3,131 sentences |
+| Decoding          | 0.007 ms/token, 0.17 ms/sentence |
+| Model on disk     | 1.17 MB (12 tags × 10,983 words) |
+
+Phase 6 tags only the two or three words in front of the caret, so the
+per-sentence figure is a generous upper bound; the reranker will barely touch
+the ~50 ms keystroke budget.
+
+Artefacts: `data/models/hmm_english.pkl`, and
+`data/raw/sample_tagged_english.conll` (200 sentences, committed) so a fresh
+clone with no NLTK downloads still runs.
+
+Tests: 412 passing, 1 skipped (`tests/test_hmm.py` adds 89).
+Deliverable notebook: `notebooks/04_hmm_english.ipynb` (executed — transition
+heatmap, hand trellis, underflow curve, k sweep, ablation, confusion matrix).
 
 ## Phase 5 — HMM tagger, Hindi
 

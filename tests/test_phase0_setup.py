@@ -91,7 +91,8 @@ REQUIRED_KEYS = [
     "prediction.latency.debounce_ms", "prediction.latency.p95_budget_ms",
     # Phases 4-5
     "hmm.language", "hmm.tagset", "hmm.smoothing_k", "hmm.use_log_space",
-    "hmm.unknown_word_strategy", "hmm.corpora.english", "hmm.corpora.hindi",
+    "hmm.unknown_word_strategy", "hmm.unknown_prior",
+    "hmm.corpora.english", "hmm.corpora.hindi",
     "hmm.split.train", "hmm.split.test", "hmm.split.seed",
     # Phase 6
     "reranking.enabled", "reranking.alpha", "reranking.tag_context_size",
