@@ -1,4 +1,8 @@
-"""Phase 4 tests — HMM POS tagger, Viterbi decoding and unknown-word handling."""
+"""Phase 4-5 tests — HMM POS tagger, Viterbi decoding, unknown words, Hindi.
+
+Phase 5 adds no class and no decoder, so its tests live here: the code under
+test is the same code, exercised on Devanagari.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +12,10 @@ import math
 import numpy as np
 import pytest
 
+from nticipate.preprocess import contains_devanagari
 from nticipate.hmm import (
+    DANDA,
+    DEVANAGARI_SUFFIX_RULES,
     NUM_TAGS,
     PROPER_TAGS,
     PUNCT_TAGS,
@@ -17,13 +24,17 @@ from nticipate.hmm import (
     HMMTagger,
     MostFrequentTagBaseline,
     candidate_tags,
+    clean_tagged_sentences,
     collect_predictions,
     confusion_matrix,
     confusion_pairs,
     evaluate_tagger,
+    language_comparison,
     load_tagged_sentences,
     read_conll,
     smoothing_sweep,
+    suffix_rule_report,
+    tagged_corpus_stats,
     train_tagger,
     train_test_split_tagged,
     unknown_word_ablation,
@@ -583,3 +594,252 @@ def test_shipped_smoothing_beats_add_one():
     rows = {r["k"]: r["accuracy"] for r in smoothing_sweep(train, test,
                                                            values=(1.0, 0.01))}
     assert rows[0.01] > rows[1.0]
+
+
+# ==========================================================================
+# Phase 5 — the same class, in Devanagari
+# ==========================================================================
+
+# Bureau of Indian Standards tags, as NLTK's hindi.pos uses them: NN common
+# noun, NNP proper noun, VFM finite main verb, VAUX auxiliary, PREP
+# postposition, PRP pronoun, JJ adjective, PUNC punctuation.
+HINDI = [
+    [("राम", "NNP"), ("ने", "PREP"), ("किताब", "NN"), ("पढ़ी", "VFM"), ("।", "PUNC")],
+    [("सीता", "NNP"), ("ने", "PREP"), ("किताब", "NN"), ("लिखी", "VFM"), ("।", "PUNC")],
+    [("यह", "PRP"), ("अच्छी", "JJ"), ("किताब", "NN"), ("है", "VAUX"), ("।", "PUNC")],
+    [("राम", "NNP"), ("घर", "NN"), ("जाता", "VFM"), ("है", "VAUX"), ("।", "PUNC")],
+]
+
+
+def hindi_tagger(**kwargs) -> HMMTagger:
+    kwargs.setdefault("smoothing_k", 0.1)
+    return HMMTagger(**kwargs).fit(HINDI)
+
+
+# ------------------------------------------------- Devanagari suffix rules
+
+@pytest.mark.parametrize("word, expected", [
+    ("लोगों", "NN"),          # oblique plural, the most reliable rule of the set
+    ("बच्चियों", "NN"),
+    ("करने", "VNN"),          # oblique infinitive
+    ("देखकर", "VRB"),         # conjunctive participle
+    ("करेंगे", "VFM"),        # future
+    ("राष्ट्रीय", "JJ"),
+])
+def test_devanagari_suffix_rules_fire(word, expected):
+    assert candidate_tags(word)[0] == expected
+
+
+def test_devanagari_words_do_not_reach_the_english_rules():
+    assert candidate_tags("भारत") == ()
+
+
+def test_english_words_do_not_reach_the_devanagari_rules():
+    devanagari_tags = {tags[0] for _, tags in DEVANAGARI_SUFFIX_RULES}
+    assert not devanagari_tags & set(candidate_tags("running"))
+
+
+def test_devanagari_is_unicameral_so_no_proper_noun_rule_applies():
+    """The most productive English rule has no Hindi counterpart at all.
+
+    Capitalisation carries the proper-noun signal in English and does not exist
+    in Devanagari, so a Hindi proper noun is indistinguishable by shape from
+    any other unseen word. Phase 5's accuracy gap starts here.
+    """
+    assert candidate_tags("दिल्ली", is_first=False) != PROPER_TAGS
+
+
+def test_short_devanagari_words_do_not_trigger_suffix_rules():
+    # Two characters of stem are required, exactly as in English.
+    assert candidate_tags("है") == ()
+    assert candidate_tags("ने") == ()
+
+
+def test_danda_is_recognised_as_punctuation():
+    for mark in DANDA:
+        assert candidate_tags(mark) == PUNCT_TAGS
+
+
+def test_devanagari_digits_are_recognised_as_numerals():
+    assert candidate_tags("१९९८") == NUM_TAGS
+
+
+def test_the_hindi_tagset_has_a_home_in_the_shape_rules():
+    # The BIS spellings, alongside the universal and Penn ones.
+    assert "PUNC" in PUNCT_TAGS and "QFNUM" in NUM_TAGS
+
+
+# ----------------------------------------------------------- the same class
+
+def test_the_same_class_trains_and_decodes_hindi():
+    """Phase 5's actual claim: zero code changes, only a different corpus."""
+    tagger = hindi_tagger()
+    assert set(tagger.tags) == {"NNP", "PREP", "NN", "VFM", "PRP", "JJ",
+                                "VAUX", "PUNC"}
+    tokens = ["राम", "ने", "किताब", "पढ़ी", "।"]
+    assert tagger.viterbi(tokens) == ["NNP", "PREP", "NN", "VFM", "PUNC"]
+
+
+def test_hindi_context_decides_the_tag_as_it_does_in_english():
+    tagged = dict(hindi_tagger().tag(["यह", "अच्छी", "किताब", "है", "।"]))
+    assert tagged["किताब"] == "NN"
+
+
+def test_an_unseen_hindi_word_gets_the_devanagari_heuristic():
+    tagger = hindi_tagger()
+    assert not tagger.knows("मकानों")
+    # Only gaps between tags carry meaning here: _boosted holds the guessed
+    # tag at its prior score and pushes every other tag down.
+    noun, verb = tagger.tags.index("NN"), tagger.tags.index("VFM")
+    prior = tagger.log_emission_unk
+    boosted = tagger.emission_column("मकानों")
+    assert boosted[noun] - boosted[verb] > prior[noun] - prior[verb]
+
+
+def test_hindi_model_survives_a_save_load_round_trip(tmp_path):
+    tagger = hindi_tagger()
+    tokens = ["सीता", "ने", "किताब", "लिखी", "।"]
+    restored = HMMTagger.load(tagger.save(tmp_path / "hindi.pkl"))
+    assert restored.viterbi(tokens) == tagger.viterbi(tokens)
+
+
+# --------------------------------------------------------- corpus cleaning
+
+def test_cleaning_drops_tokens_with_a_blank_tag():
+    # NLTK's hindi.pos ships a couple of dozen of these. Left in, "" becomes a
+    # tag: a row in both matrices that no prediction can ever match.
+    cleaned = clean_tagged_sentences([[("घर", "NN"), ("कुछ", "  "), ("है", "VAUX")]])
+    assert cleaned == [[("घर", "NN"), ("है", "VAUX")]]
+
+
+def test_cleaning_drops_a_sentence_left_empty():
+    assert clean_tagged_sentences([[("कुछ", "")], [("घर", "NN")]]) == [[("घर", "NN")]]
+
+
+def test_cleaning_splits_a_glued_danda_off_the_word_in_front_of_it():
+    cleaned = clean_tagged_sentences([[("घर।", "NN")]])
+    assert [w for w, _ in cleaned[0]] == ["घर", "।"]
+
+
+def test_a_split_danda_takes_the_tag_this_corpus_gives_punctuation():
+    # Read off the corpus, because punctuation is "." in the universal tagset
+    # and "PUNC" in the Hindi one.
+    cleaned = clean_tagged_sentences(HINDI + [[("घर।", "NN")]])
+    assert cleaned[-1] == [("घर", "NN"), ("।", "PUNC")]
+
+
+def test_a_token_of_nothing_but_dandas_stays_punctuation():
+    cleaned = clean_tagged_sentences([[("घर", "NN"), ("।", "PUNC"), ("॥", "PUNC")]])
+    assert [t for _, t in cleaned[0]] == ["NN", "PUNC", "PUNC"]
+
+
+def test_cleaning_normalises_devanagari_to_one_spelling():
+    # U+0958 and U+0915 U+093C are one letter written two ways. Unnormalised
+    # they are two word types, inflating both vocabulary and OOV rate.
+    precomposed = [[("\u0958ानून", "NN")]]
+    decomposed = [[("\u0915\u093cानून", "NN")]]
+    assert clean_tagged_sentences(precomposed) == clean_tagged_sentences(decomposed)
+
+
+def test_cleaning_leaves_english_alone():
+    assert clean_tagged_sentences(TRAIN) == [list(s) for s in TRAIN]
+
+
+def test_cleaning_does_not_alias_its_input():
+    sentences = [list(s) for s in HINDI]
+    clean_tagged_sentences(sentences)[0].append(("injected", "NN"))
+    assert all(("injected", "NN") not in s for s in sentences)
+
+
+# ----------------------------------------------------------- rule reporting
+
+def test_suffix_rule_report_counts_types_not_tokens():
+    # These rules only ever meet unseen words, so counting a frequent word once
+    # per occurrence would measure a population they never see.
+    once = [[("मकानों", "NN")]]
+    many = [[("मकानों", "NN")] for _ in range(9)]
+    assert suffix_rule_report(once) == suffix_rule_report(many)
+
+
+def test_suffix_rule_report_scores_the_rule_against_the_gold_tag():
+    rows = {r["suffix"]: r for r in suffix_rule_report(
+        [[("मकानों", "NN")], [("दिनों", "VFM")]])}
+    assert rows["ों"]["types"] == 2
+    assert rows["ों"]["purity"] == 0.5
+
+
+def test_suffix_rule_report_uses_the_taggers_own_first_match_order():
+    # "ियों" shadows "ों" here exactly as it does inside candidate_tags.
+    assert {r["suffix"] for r in suffix_rule_report([[("बच्चियों", "NN")]])} == {"ियों"}
+
+
+# ------------------------------------------------------------- corpus shape
+
+def test_corpus_stats_report_size_and_type_token_ratio():
+    stats = tagged_corpus_stats(HINDI)
+    assert stats["sentences"] == 4
+    assert stats["tokens"] == 20
+    assert stats["types"] == len({w for s in HINDI for w, _ in s})
+    assert stats["ttr"] == pytest.approx(stats["types"] / stats["tokens"])
+
+
+def test_corpus_stats_on_an_empty_corpus_do_not_divide_by_zero():
+    assert tagged_corpus_stats([])["ttr"] == 0.0
+
+
+# ------------------------------------------------------- real Hindi (slow)
+
+def _hindi(limit: int | None = None):
+    try:
+        return load_tagged_sentences("hindi", limit=limit)
+    except Exception:
+        pytest.skip("tagged Hindi corpus not available -- run setup_env.py")
+
+
+def test_hindi_corpus_loads_as_devanagari_word_tag_pairs():
+    sentences = _hindi(limit=20)
+    assert any(contains_devanagari(w) for s in sentences for w, _ in s)
+
+
+def test_the_loaded_hindi_corpus_carries_no_blank_tags():
+    assert all(t.strip() for s in _hindi() for _, t in s)
+
+
+def test_hindi_hmm_beats_the_most_frequent_tag_baseline():
+    """Phase 5's acceptance criterion: the identical class works on Hindi."""
+    train, test = train_test_split_tagged(_hindi())
+    hmm = HMMTagger().fit(train).evaluate(test)
+    baseline = MostFrequentTagBaseline().fit(train).evaluate(test)
+    assert hmm.accuracy > baseline.accuracy
+
+
+def test_the_devanagari_rules_earn_their_place_on_unseen_hindi_words():
+    train, test = train_test_split_tagged(_hindi())
+    rows = {r["strategy"]: r for r in unknown_word_ablation(
+        train, test, priors=("hapax",))}
+    assert rows["suffix"]["unknown_accuracy"] > rows["uniform"]["unknown_accuracy"]
+
+
+def test_hindi_is_harder_than_english_because_more_of_it_is_unseen():
+    """The second half of the Phase 5 criterion, as a test rather than a claim.
+
+    The gap has to be explained by a measured OOV rate rather than asserted, so
+    this pins the explanation down: Hindi scores lower *and* carries the higher
+    OOV rate and type-token ratio. Were Hindi ever to score lower at an equal
+    OOV rate, the report's explanation would be wrong and this would say so.
+    """
+    try:
+        rows = {r["language"]: r for r in language_comparison()}
+    except Exception:
+        pytest.skip("tagged corpora not available -- run setup_env.py")
+    assert rows["hindi"]["accuracy"] < rows["english"]["accuracy"]
+    assert rows["hindi"]["oov_rate"] > rows["english"]["oov_rate"]
+    assert rows["hindi"]["ttr"] > rows["english"]["ttr"]
+
+
+def test_language_comparison_carries_the_fitted_model_along():
+    try:
+        rows = language_comparison(("hindi",), limit=60)
+    except Exception:
+        pytest.skip("tagged Hindi corpus not available -- run setup_env.py")
+    assert rows[0]["tagger"].is_fitted and rows[0]["test"]

@@ -152,7 +152,7 @@ def segment_sentences(text: str, splitter: str | None = None) -> list[str]:
     if not text:
         return []
 
-    if splitter == "punkt" and not _contains_devanagari(text) and _punkt_available():
+    if splitter == "punkt" and not contains_devanagari(text) and _punkt_available():
         try:
             import nltk
 
@@ -163,7 +163,8 @@ def segment_sentences(text: str, splitter: str | None = None) -> list[str]:
     return [s for s in (s.strip() for s in SENTENCE_SPLIT_RE.split(text)) if s]
 
 
-def _contains_devanagari(text: str) -> bool:
+def contains_devanagari(text: str) -> bool:
+    """True when any character is Devanagari. Phase 5 branches on this."""
     return any("ऀ" <= ch <= "ॿ" for ch in text)
 
 
@@ -193,7 +194,7 @@ def tokenize(sentence: str, tokenizer: str | None = None) -> Sentence:
     if not sentence:
         return []
 
-    if tokenizer == "nltk" and not _contains_devanagari(sentence) and _treebank_available():
+    if tokenizer == "nltk" and not contains_devanagari(sentence) and _treebank_available():
         try:
             from nltk.tokenize import TreebankWordTokenizer
 

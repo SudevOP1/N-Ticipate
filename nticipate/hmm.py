@@ -66,6 +66,24 @@ rather than one number that moved for two reasons.
 The suffix table is deliberately written as *data* (:data:`SUFFIX_RULES`) with
 candidate tag names rather than one hardcoded tagset, so Phase 5 can bolt a
 Devanagari branch on to the same class without touching a line of the decoder.
+
+Phase 5 is that branch, and it really is only a branch: the Hindi tagger is
+this class, these matrices and this decoder, counting a different corpus. Three
+things are language-specific and all three sit outside the model —
+:data:`DEVANAGARI_SUFFIX_RULES` (Hindi is a suffixing language, so the same
+*kind* of rule works with different strings), the shared punctuation and
+numeral tag lists which grew the Bureau of Indian Standards spellings
+(``PUNC``, ``QFNUM``) alongside the universal ones, and
+:func:`clean_tagged_sentences`, which NFC-normalises Devanagari, drops the
+blank-tagged tokens NLTK's Hindi corpus ships with, and splits a danda (``।``)
+off the word it is glued to.
+
+One English rule has no Hindi counterpart at all: "a capital letter
+mid-sentence means proper noun" is the most productive unknown-word rule there
+is, and Devanagari is unicameral, so Hindi loses it with nothing to put in its
+place. That, plus an OOV rate roughly three times English's on a corpus a
+twentieth the size, is where the accuracy gap comes from — measured in notebook
+05 rather than asserted.
 """
 
 from __future__ import annotations
@@ -73,6 +91,7 @@ from __future__ import annotations
 import math
 import pickle
 import random
+import unicodedata
 import warnings
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
@@ -82,6 +101,7 @@ from typing import Iterable, Sequence
 import numpy as np
 
 from nticipate.config import get, resolve_path
+from nticipate.preprocess import contains_devanagari
 
 #: A sentence of ``(word, tag)`` pairs — the input and output currency here.
 TaggedSentence = list[tuple[str, str]]
@@ -126,9 +146,52 @@ SUFFIX_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("s", ("NNS", "NOUN")),
 )
 
-PUNCT_TAGS = (".", "PUNCT", "SYM", "RD_PUNC")
-NUM_TAGS = ("CD", "NUM", "QC")
+#: Tag *names* for the shape-based rules, across every tagset in play: the
+#: universal one, Penn, and the Bureau of Indian Standards tagset NLTK's Hindi
+#: corpus uses (``PUNC``, ``QFNUM``). Only the names that exist in the trained
+#: tagset are ever used, so listing all of them costs nothing and is what lets
+#: one rule table serve three tagsets.
+PUNCT_TAGS = (".", "PUNCT", "PUNC", "SYM", "RD_PUNC")
+NUM_TAGS = ("CD", "NUM", "QC", "QFNUM")
 PROPER_TAGS = ("NNP", "PROPN", "NNPS", "NOUN")
+
+#: Devanagari suffixes, mined from the *training* split in notebook 05 and kept
+#: only where they were both frequent and reasonably pure, then cross-checked
+#: against Hindi morphology. Same shape as :data:`SUFFIX_RULES`, and read by
+#: the same matcher.
+#:
+#: The oblique-plural ``-ों`` family is the standout: it is unambiguous (94% of
+#: training types carrying it are common nouns, and every ``-यों``/``-ियों``
+#: type is) and it is productive, which is exactly the combination a rule for
+#: *unseen* words needs. Verb endings are next — ``-ने`` for the oblique
+#: infinitive, ``-कर`` for the conjunctive participle, ``-ेंगे``/``-ंगे`` for
+#: the future — and they are the same tense-and-agreement morphology English
+#: reaches for with ``-ing`` and ``-ed``.
+#:
+#: Deliberately absent: ``-ना`` (bare infinitive, 26% pure — it is also a
+#: common noun ending), ``-ता`` (splits between agentive nouns and imperfective
+#: verbs, 56%), ``-ार``/``-ान`` (noun-ish but only just, and mostly on proper
+#: nouns no spelling rule can reach), and bare ``-गे`` (50% on two training
+#: types, and ``-ंगे`` already covers the useful cases). A rule that fires on a
+#: coin-flip is worse than no rule: it spends the heuristic's confidence on
+#: noise.
+#:
+#: ``-ीय`` is the one judgement call, kept at 56% train purity. Its misses are
+#: almost all ``NNC``, the tag for a non-final element of a compound noun —
+#: which is a statement about the word's position, not about its shape, and no
+#: suffix rule can predict position. Against the lexical tags it competes with,
+#: the rule is right.
+DEVANAGARI_SUFFIX_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("ियों", ("NN", "NOUN")),
+    ("यों", ("NN", "NOUN")),
+    ("ेंगे", ("VFM", "VERB")),
+    ("ंगे", ("VFM", "VERB")),
+    ("ओं", ("NN", "NOUN")),
+    ("ों", ("NN", "NOUN")),
+    ("ने", ("VNN", "VERB")),
+    ("कर", ("VRB", "VERB")),
+    ("ीय", ("JJ", "ADJ")),
+)
 
 #: Share of the unseen-word probability mass handed to the heuristic's tags.
 #: The remaining 1 - this is left on the Laplace floor, so a heuristic that
@@ -145,26 +208,53 @@ def candidate_tags(word: str, is_first: bool = False) -> tuple[str, ...]:
 
     ``is_first`` suppresses the capitalised-word rule at sentence start, where
     capitalisation carries no information at all.
+
+    Script decides which suffix table applies: a word containing Devanagari is
+    matched against :data:`DEVANAGARI_SUFFIX_RULES`, anything else against
+    :data:`SUFFIX_RULES`. The shape rules above the split — punctuation,
+    digits — are script-independent and shared.
     """
     if not word:
         return ()
     if not any(ch.isalnum() for ch in word):
         return PUNCT_TAGS
     if any(ch.isdigit() for ch in word):
+        # Devanagari digits (०-९) are category Nd, so this catches them too.
         return NUM_TAGS
+
+    if contains_devanagari(word):
+        # No capitalisation branch above this one, because there is no
+        # capitalisation: Devanagari is unicameral. Hindi gets suffixes only.
+        return _match_suffix(word, _DEVANAGARI_RULES_BY_LENGTH)
+
     if not is_first and word[:1].isupper():
         return PROPER_TAGS
 
-    lower = word.lower()
-    for suffix, tags in _SUFFIX_RULES_BY_LENGTH:
+    return _match_suffix(word.lower(), _SUFFIX_RULES_BY_LENGTH)
+
+
+def _match_suffix(
+    word: str,
+    rules: Sequence[tuple[str, tuple[str, ...]]],
+) -> tuple[str, ...]:
+    """First matching rule from a longest-suffix-first table."""
+    for suffix, tags in rules:
         # Require at least two characters of stem, so "s" does not fire on
-        # "is" and "ly" does not fire on "ly".
-        if lower.endswith(suffix) and len(lower) >= len(suffix) + 2:
+        # "is" and "ly" does not fire on "ly". Devanagari matras count as
+        # characters here, which is the right unit: "ों" is two code points of
+        # ending, and demanding a two-code-point stem keeps the rule off
+        # two-letter function words.
+        if word.endswith(suffix) and len(word) >= len(suffix) + 2:
             return tags
     return ()
 
 
-_SUFFIX_RULES_BY_LENGTH = tuple(sorted(SUFFIX_RULES, key=lambda rule: -len(rule[0])))
+def _by_length(rules) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    return tuple(sorted(rules, key=lambda rule: -len(rule[0])))
+
+
+_SUFFIX_RULES_BY_LENGTH = _by_length(SUFFIX_RULES)
+_DEVANAGARI_RULES_BY_LENGTH = _by_length(DEVANAGARI_SUFFIX_RULES)
 
 
 # --------------------------------------------------------------------------
@@ -913,6 +1003,75 @@ def without_oov(
 #: Corpora whose NLTK reader needs a file id (Phase 5's Hindi lives here).
 NLTK_FILEIDS = {"indian": "hindi.pos"}
 
+#: The Devanagari full stop and its doubled form — sentence punctuation, not
+#: part of the word in front of them.
+DANDA = "।॥"
+
+
+def _punctuation_tag(sentences: Sequence[TaggedSentence]) -> str:
+    """Whatever tag *this* corpus gives standalone punctuation.
+
+    Read off the corpus rather than hardcoded, because the answer is ``.`` in
+    the universal tagset and ``PUNC`` in the Hindi one, and a danda split out
+    of a word has to be tagged in the same currency as the rest of the file.
+    """
+    counts = Counter(
+        tag for sentence in sentences for word, tag in sentence
+        if tag.strip() and word.strip() and not any(ch.isalnum() for ch in word)
+    )
+    return counts.most_common(1)[0][0] if counts else PUNCT_TAGS[0]
+
+
+def clean_tagged_sentences(
+    sentences: Iterable[TaggedSentence],
+    normalize: str | None = None,
+) -> list[TaggedSentence]:
+    """Three repairs a gold corpus should not need, and the Hindi one does.
+
+    **NFC.** Devanagari spells several consonants two ways — क़ as one code
+    point, or क plus a nukta as two. Un-normalised they are different strings,
+    so they are different word types, so the vocabulary and the OOV rate both
+    inflate for no linguistic reason. ``preprocessing.normalize_unicode``
+    already fixes this for Phase 1's text; this does it for tagged input.
+
+    **Blank tags.** ``hindi.pos`` carries a couple of dozen tokens whose tag
+    column is empty. Left in, ``""`` becomes a tag like any other: it takes a
+    row in the transition matrix, a row in the emission matrix, and it is
+    unscoreable — no prediction can ever be right.
+
+    **Danda.** ``।`` glued to the word before it invents a new word type out of
+    every sentence-final word. Split off it is one ordinary punctuation token,
+    tagged as :func:`_punctuation_tag` says this corpus tags punctuation.
+
+    English input passes through unchanged, which is the point: the loader
+    calls this for every language and there is no branch on which one.
+    """
+    if normalize is None:
+        normalize = get("preprocessing.normalize_unicode", "NFC")
+
+    materialised = [list(sentence) for sentence in sentences]
+    punct_tag = _punctuation_tag(materialised)
+
+    cleaned: list[TaggedSentence] = []
+    for sentence in materialised:
+        row: TaggedSentence = []
+        for word, tag in sentence:
+            if normalize:
+                word = unicodedata.normalize(normalize, word)
+            word, tag = word.strip(), tag.strip()
+            if not word or not tag:
+                continue
+            stem = word.rstrip(DANDA)
+            if stem:
+                row.append((stem, tag))
+                row.extend((mark, punct_tag) for mark in word[len(stem):])
+            else:
+                # The token is nothing but dandas — punctuation already.
+                row.extend((mark, punct_tag) for mark in word)
+        if row:
+            cleaned.append(row)
+    return cleaned
+
 
 def read_conll(path: str | Path) -> list[TaggedSentence]:
     """Read a two-column ``word<TAB>tag`` file, blank line between sentences.
@@ -990,6 +1149,9 @@ def load_tagged_sentences(
     gold-tagged and large — and falls back to the ``.conll`` file at
     ``hmm.corpora.<language>``, so a fresh clone with nothing downloaded still
     runs. Phase 5 changes the argument, not the code.
+
+    Either way the result goes through :func:`clean_tagged_sentences` — the
+    Hindi corpus needs it and English is unaffected by it.
     """
     if language is None:
         language = get("hmm.language", "english")
@@ -998,7 +1160,7 @@ def load_tagged_sentences(
     nltk_name = get(f"hmm.corpora.{language}_nltk")
     if nltk_name:
         try:
-            return _load_nltk_tagged(nltk_name, tagset, limit)
+            return clean_tagged_sentences(_load_nltk_tagged(nltk_name, tagset, limit))
         except Exception:
             pass
 
@@ -1007,7 +1169,7 @@ def load_tagged_sentences(
         path = resolve_path(fallback)
         if path.is_file():
             sentences = read_conll(path)
-            return sentences[:limit] if limit else sentences
+            return clean_tagged_sentences(sentences[:limit] if limit else sentences)
 
     raise FileNotFoundError(
         f"No tagged corpus for {language!r}: NLTK corpus {nltk_name!r} is not "
@@ -1098,5 +1260,120 @@ def smoothing_sweep(
             "accuracy": result.accuracy,
             "known_accuracy": result.known_accuracy,
             "unknown_accuracy": result.unknown_accuracy,
+        })
+    return rows
+
+
+# --------------------------------------------------------------------------
+# Phase 5 — cross-language comparison
+# --------------------------------------------------------------------------
+
+def tagged_corpus_stats(sentences: Sequence[TaggedSentence]) -> dict:
+    """Shape of a tagged corpus: size, type-token ratio, tagset.
+
+    The type-token ratio is the number worth reading next to an accuracy. A
+    morphologically rich language spells one lemma many ways, so it burns
+    through vocabulary faster at equal token count — a higher TTR on a smaller
+    corpus predicts the OOV rate, and the OOV rate predicts most of the gap
+    between two taggers that are otherwise the same code.
+    """
+    tokens = [word for sentence in sentences for word, _ in sentence]
+    tags = Counter(tag for sentence in sentences for _, tag in sentence)
+    types = set(tokens)
+    return {
+        "sentences": len(sentences),
+        "tokens": len(tokens),
+        "types": len(types),
+        "ttr": len(types) / len(tokens) if tokens else 0.0,
+        "mean_sentence_len": len(tokens) / len(sentences) if sentences else 0.0,
+        "tags": len(tags),
+        "most_common_tag": tags.most_common(1)[0][0] if tags else "",
+    }
+
+
+def suffix_rule_report(
+    sentences: Sequence[TaggedSentence],
+    rules: Sequence[tuple[str, tuple[str, ...]]] | None = None,
+) -> list[dict]:
+    """Per-rule accuracy of the suffix table, counted over word *types*.
+
+    Types rather than tokens, because these rules only ever fire on words the
+    model has not seen; counting a frequent word once per occurrence would
+    measure a population the heuristic never meets.
+
+    ``rules`` defaults to whichever table the word's script selects, and the
+    first-match order is the tagger's own, so a rule shadowed by a longer one
+    shows up here with the smaller support it actually has.
+    """
+    types: defaultdict[str, Counter] = defaultdict(Counter)
+    for sentence in sentences:
+        for word, tag in sentence:
+            types[word][tag] += 1
+
+    fired: defaultdict[str, list[int]] = defaultdict(lambda: [0, 0])
+    labels: dict[str, tuple[str, ...]] = {}
+    for word, tag_counts in types.items():
+        table = rules
+        if table is None:
+            table = (
+                _DEVANAGARI_RULES_BY_LENGTH if contains_devanagari(word)
+                else _SUFFIX_RULES_BY_LENGTH
+            )
+        for suffix, tags in table:
+            if word.endswith(suffix) and len(word) >= len(suffix) + 2:
+                gold = tag_counts.most_common(1)[0][0]
+                labels[suffix] = tags
+                fired[suffix][1] += 1
+                fired[suffix][0] += int(gold in tags)
+                break
+
+    rows = [
+        {
+            "suffix": suffix,
+            "tags": labels[suffix],
+            "types": total,
+            "correct": hits,
+            "purity": hits / total if total else 0.0,
+        }
+        for suffix, (hits, total) in fired.items()
+    ]
+    return sorted(rows, key=lambda row: -row["types"])
+
+
+def language_comparison(
+    languages: Sequence[str] = ("english", "hindi"),
+    limit: int | None = None,
+    **tagger_kwargs,
+) -> list[dict]:
+    """Train and score the same class on each language — the Phase 5 table.
+
+    One row per language, carrying the corpus shape, the tagger, the
+    most-frequent-tag baseline and the OOV rate together, because reading any
+    of them alone invites the wrong conclusion: Hindi scoring below English
+    says nothing until the OOV rates sit in the next column.
+
+    The fitted tagger and its held-out split ride along under ``tagger`` and
+    ``test`` so the caller can carry on to a confusion matrix without paying
+    for a second fit.
+    """
+    rows = []
+    for language in languages:
+        sentences = load_tagged_sentences(language, limit=limit)
+        train, test = train_test_split_tagged(sentences)
+        tagger = HMMTagger(**tagger_kwargs).fit(train)
+        result = tagger.evaluate(test)
+        baseline = MostFrequentTagBaseline().fit(train).evaluate(test)
+        rows.append({
+            "language": language,
+            **tagged_corpus_stats(sentences),
+            "train_sentences": len(train),
+            "test_sentences": len(test),
+            "accuracy": result.accuracy,
+            "known_accuracy": result.known_accuracy,
+            "unknown_accuracy": result.unknown_accuracy,
+            "oov_rate": result.oov_rate,
+            "baseline_accuracy": baseline.accuracy,
+            "tagger": tagger,
+            "test": test,
         })
     return rows
