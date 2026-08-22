@@ -32,7 +32,7 @@ One module per phase, all under `nticipate/`:
 | `preprocess.py` | 1 | `clean_text → segment_sentences → tokenize → build_vocab/apply_unk → truecase → pad_sentence → train_dev_test_split`, bundled as `Corpus` |
 | `ngram.py` | 2 | `NgramModel` — MLE / Laplace / stupid-backoff / Kneser-Ney, perplexity, pruning, generation |
 | `trie.py`, `userprofile.py` | 3 | Prefix trie for completions; per-user n-gram model learned from typing |
-| `predictor.py` | 3, 6 | `Predictor.predict()` — the single entry point for both prediction modes |
+| `predictor.py` | 3, 6 | `Predictor.predict()` — the single entry point for both prediction modes; attaching an `HMMTagger` turns on the Phase 6 POS term |
 | `hmm.py` | 4, 5 | `HMMTagger` — from-scratch transition/emission/initial matrices, log-space Viterbi |
 | `app/` | 7 | Tray, hooks, overlay, injector — not yet written |
 
@@ -61,6 +61,10 @@ These are documented in module docstrings and measured in `report/notes.md`. Do 
 - **Stupid backoff is unnormalised**, so the predictor's `λ·P_user + (1−λ)·P_base` blend mixes two unnormalised scores. It is a ranking heuristic, not a probability — don't write `P(w|h)` about it in the report without the caveat.
 - **The user profile's vocabulary is never `<UNK>`-ed.** Capturing names and jargon the base corpus discards is the entire point of personalization.
 - **Phase 5 adds no new class.** Hindi runs through the same `HMMTagger` with only a different corpus plus the Devanagari branch of the suffix heuristic; its tests live in `tests/test_hmm.py`.
+- **Phase 6 adds no new class either.** The reranker is a term inside `Predictor.predict()`; its tests live in `tests/test_predictor.py`. With no tagger attached the predictor is exactly Phase 3, which is why `reranking.enabled: true` is safe as a default.
+- **Reranking scores are logs; Phase 3 scores are probabilities.** `predict()` switches representation when the POS term is live. The ranking is unaffected at `alpha = 0` (the log is monotonic) and a test asserts it.
+- **The candidate's tag is guessed context-free.** Tagging each candidate in context would cost one Viterbi decode per candidate per keystroke. The shortcut agrees with the in-context tag 93% of the time — measured, not assumed, by `typical_tag_agreement()`.
+- **`reranking.tag_context_size` is a tagging window, not a tag order.** The HMM is a tag bigram, so exactly one preceding tag ever conditions the term. Raising the window above 2 cannot change anything in the running app: `predict()` has already trimmed the context to the trigram model's two words.
 
 ## Tests and notebooks
 
@@ -68,4 +72,4 @@ These are documented in module docstrings and measured in `report/notes.md`. Do 
 
 ## Current state
 
-Phases 0–5 are committed and the suite is green (448 passed, 1 skipped). Two things are stale: the status table at the bottom of `PLAN.md` still lists Phase 5 as not started, and `notebooks/05_hmm_regional.ipynb` plus the Phase 5 section of `report/notes.md` are unwritten. Phases 6–8 have not been started.
+Phases 0–6 are done and the suite is green (481 passed, 1 skipped). One thing is stale: `notebooks/05_hmm_regional.ipynb` and the Phase 5 section of `report/notes.md` were never written, though the Phase 5 code and tests are complete. Phases 7–8 have not been started.

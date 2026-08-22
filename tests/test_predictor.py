@@ -1,17 +1,28 @@
-"""Phase 3 tests — the prediction engine."""
+"""Phase 3 tests — the prediction engine — and Phase 6, the POS reranker.
+
+Phase 6 adds no new class: it is a term inside :meth:`Predictor.predict`, so
+its tests belong next to the ranking they change.
+"""
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
+from nticipate.hmm import HMMTagger
 from nticipate.ngram import NgramModel
 from nticipate.predictor import (
     Mode,
     Predictor,
+    alpha_sweep,
     completion_hit_at_k,
     hit_at_k,
     keystroke_savings,
     latency_stats,
+    rerank_ablation,
+    reranking,
+    tag_window_disagreement,
+    typical_tag_agreement,
 )
 from nticipate.trie import Trie
 from nticipate.userprofile import UserProfile
@@ -306,3 +317,347 @@ def test_punctuation_filter_keeps_real_words():
     predictor = make_predictor(suggest_punctuation=False)
     words = [s.word.lower() for s in predictor.predict(["like", "to"], "", k=3)]
     assert "know" in words
+
+
+# ==========================================================================
+# Phase 6 — POS-aware reranking
+# ==========================================================================
+
+# The same sentences as TRAIN, tagged. Keeping the two corpora aligned is what
+# lets these tests say anything about ranking: a tagger that had never seen the
+# candidate words would send every one of them down the unknown-word path and
+# the POS term would be measuring the suffix heuristic instead.
+TAGGED = [
+    [("i", "PRON"), ("would", "VERB"), ("like", "VERB"), ("to", "PRT"),
+     ("know", "VERB"), ("more", "ADJ")],
+    [("i", "PRON"), ("would", "VERB"), ("like", "VERB"), ("to", "PRT"),
+     ("know", "VERB"), ("why", "ADV")],
+    [("i", "PRON"), ("would", "VERB"), ("like", "VERB"), ("to", "PRT"),
+     ("thank", "VERB"), ("you", "PRON")],
+    [("the", "DET"), ("recent", "ADJ"), ("report", "NOUN"), ("was", "VERB"),
+     ("good", "ADJ")],
+    [("the", "DET"), ("record", "NOUN"), ("was", "VERB"), ("broken", "VERB")],
+    [("please", "ADV"), ("recommend", "VERB"), ("a", "DET"), ("good", "ADJ"),
+     ("book", "NOUN")],
+    [("the", "DET"), ("report", "NOUN"), ("was", "VERB"), ("good", "ADJ")],
+] * 3
+
+
+def make_tagger() -> HMMTagger:
+    return HMMTagger().fit(TAGGED)
+
+
+def make_reranking_predictor(**kw) -> Predictor:
+    kw.setdefault("tagger", make_tagger())
+    return make_predictor(**kw)
+
+
+# ------------------------------------------------------------------- wiring
+
+def test_no_tagger_means_no_reranking():
+    predictor = make_predictor()
+    assert predictor.tagger is None
+    assert predictor.rerank_active is False
+    assert all(s.tag is None for s in predictor.predict(["like", "to"]))
+
+
+def test_attaching_a_tagger_turns_reranking_on():
+    predictor = make_predictor()
+    predictor.attach_tagger(make_tagger())
+    assert predictor.rerank_active is True
+
+
+def test_rerank_flag_disables_the_term_even_with_a_tagger():
+    predictor = make_reranking_predictor(rerank=False)
+    assert predictor.tagger is not None
+    assert predictor.rerank_active is False
+
+
+def test_unfitted_tagger_is_not_active():
+    predictor = make_predictor(tagger=HMMTagger())
+    assert predictor.rerank_active is False
+
+
+def test_attach_tagger_clears_the_caches():
+    predictor = make_reranking_predictor()
+    predictor.predict(["like", "to"])
+    assert predictor._word_tag_cache
+    predictor.attach_tagger(make_tagger())
+    assert predictor._word_tag_cache == {}
+    assert predictor._context_tag_cache == {}
+
+
+def test_repr_reports_the_rerank_weight():
+    assert "rerank=alpha=" in repr(make_reranking_predictor())
+    assert "rerank=off" in repr(make_predictor())
+
+
+def test_suggestions_carry_their_tag():
+    for suggestion in make_reranking_predictor().predict(["like", "to"]):
+        assert suggestion.tag in make_tagger().tags
+
+
+# -------------------------------------------------------------- the tag term
+
+def test_context_tag_is_none_without_context():
+    assert make_reranking_predictor().context_tag([]) is None
+
+
+def test_context_tag_matches_the_last_trellis_column():
+    predictor = make_reranking_predictor()
+    context = ["the", "report"]
+    column = predictor.tagger.trellis(context).column(-1)
+    assert predictor.context_tag(context) == next(iter(column))
+
+
+def test_context_tag_does_not_charge_the_end_of_sentence_transition():
+    # A buffer the user is still typing has not ended, so the transition into
+    # the end-of-sentence state must not be charged to its last word. That
+    # term is not small: the end state is reached overwhelmingly from
+    # punctuation, and on the shipped English tagger it was enough to make
+    # "i would" come back tagged PRON "." -- the tagger preferring to believe
+    # "would" was a full stop over believing the sentence continued.
+    #
+    # Forcing the end distribution to a single tag makes the invariant exact:
+    # viterbi() has to follow it, and context_tag() has to ignore it.
+    predictor = make_reranking_predictor()
+    tagger = predictor.tagger
+    assert predictor.context_tag(["the", "report"]) == "NOUN"
+
+    tagger.log_final = np.full(len(tagger.tags), -50.0)
+    tagger.log_final[tagger.tags.index("ADV")] = 0.0
+    predictor._context_tag_cache = {}
+
+    assert tagger.viterbi(["the", "report"])[-1] == "ADV"
+    assert predictor.context_tag(["the", "report"]) == "NOUN"
+
+
+def test_context_tag_only_looks_at_the_window():
+    predictor = make_reranking_predictor(tag_context_size=1)
+    # With a one-token window only the last token can matter.
+    assert predictor.context_tag(["the", "report"]) == predictor.context_tag(["report"])
+
+
+def test_context_tag_is_cached():
+    predictor = make_reranking_predictor()
+    predictor.context_tag(["the", "report"])
+    assert ("the", "report") in predictor._context_tag_cache
+
+
+def test_typical_tag_of_a_known_word():
+    predictor = make_reranking_predictor()
+    assert predictor.typical_tag("report") == "NOUN"
+    assert predictor.typical_tag("know") == "VERB"
+    assert predictor.typical_tag("the") == "DET"
+
+
+def test_typical_tag_of_an_unknown_word_uses_the_suffix_heuristic():
+    # Never in TAGGED, so this is the Phase 4 unknown-word path doing the work.
+    predictor = make_reranking_predictor()
+    assert not predictor.tagger.knows("reconsidering")
+    assert predictor.typical_tag("reconsidering") == "VERB"
+
+
+def test_tag_score_is_the_transition_probability():
+    predictor = make_reranking_predictor()
+    tagger = predictor.tagger
+    expected = float(
+        tagger.log_transition[tagger.tags.index("DET"), tagger.tags.index("NOUN")]
+    )
+    assert predictor.tag_score("report", "NOUN", "DET") == pytest.approx(expected)
+
+
+def test_tag_score_without_context_uses_the_initial_distribution():
+    predictor = make_reranking_predictor()
+    tagger = predictor.tagger
+    expected = float(tagger.log_initial[tagger.tags.index("DET")])
+    assert predictor.tag_score("the", "DET", None) == pytest.approx(expected)
+
+
+def test_unknown_words_pay_the_penalty_exactly_once():
+    predictor = make_reranking_predictor(unknown_tag_penalty=-2.0)
+    known = predictor.tag_score("report", "NOUN", "DET")
+    unknown = predictor.tag_score("zzzblort", "NOUN", "DET")
+    assert unknown == pytest.approx(known - 2.0)
+
+
+# ------------------------------------------------------------------ ranking
+
+def test_alpha_zero_reproduces_the_phase_3_ranking_exactly():
+    # The logarithm is monotonic, so a zero weight on the tag term cannot
+    # reorder anything. This is the Phase 6 "done when" condition.
+    plain = make_predictor()
+    reranked = make_reranking_predictor(rerank_alpha=0.0)
+    for context in ([], ["the"], ["like", "to"], ["was"]):
+        assert [s.word for s in reranked.predict(context, k=5)] == [
+            s.word for s in plain.predict(context, k=5)
+        ]
+    for prefix in ("re", "rec", "b"):
+        assert [s.word for s in reranked.predict(["the"], prefix, k=5)] == [
+            s.word for s in plain.predict(["the"], prefix, k=5)
+        ]
+
+
+def test_reranked_scores_are_log_scale():
+    scores = [s.score for s in make_reranking_predictor().predict(["the"], k=5)]
+    assert scores and all(score < 0 for score in scores)
+    # ... and still sorted best-first.
+    assert scores == sorted(scores, reverse=True)
+
+
+def test_zero_probability_candidates_land_on_the_score_floor():
+    # Only MLE ever hands the reranker a zero: stupid backoff floors an unseen
+    # unigram on purpose (see NgramModel._stupid_backoff) precisely so that
+    # candidates do not drop out of the ranking. "the book" is an unseen
+    # bigram in TRAIN, so MLE scores it 0.0 and log(0) would be -inf.
+    model = NgramModel(order=2, smoothing="mle").fit(TRAIN)
+    predictor = Predictor(
+        model, tagger=make_tagger(), personalization=False, rerank_alpha=0.0
+    )
+    assert model.prob("book", ["the"]) == 0.0
+    hit = [s for s in predictor.predict(["the"], "b", k=5) if s.word == "book"]
+    assert hit and hit[0].score == pytest.approx(predictor.score_floor)
+
+
+def test_a_large_alpha_is_dominated_by_the_tag_term():
+    # This is the mechanism the whole phase is built on, in one assertion:
+    # after a determiner the tag bigram says NOUN or ADJ, so with the POS term
+    # turned up the verbs and pronouns the base model was happy to offer are
+    # gone, whatever their n-gram score.
+    predictor = make_reranking_predictor(rerank_alpha=50.0)
+    tags = {s.tag for s in predictor.predict(["the"], k=5)}
+    assert tags <= {"NOUN", "ADJ"}
+
+    plain = make_predictor()
+    assert {s.word for s in plain.predict(["the"], k=5)} - {
+        s.word for s in predictor.predict(["the"], k=5)
+    }
+
+
+def test_reranking_can_change_the_order():
+    # Not a claim that it improves anything — only that the term is live. If
+    # this ever passed vacuously the ablation below would be measuring noise.
+    plain = make_predictor()
+    reranked = make_reranking_predictor(rerank_alpha=5.0)
+    orders = [
+        ([s.word for s in plain.predict(c, k=5)],
+         [s.word for s in reranked.predict(c, k=5)])
+        for c in ([], ["the"], ["was"], ["like", "to"], ["a"])
+    ]
+    assert any(before != after for before, after in orders)
+
+
+# ---------------------------------------------------------------- ablation
+
+def test_reranking_context_manager_restores_state():
+    predictor = make_reranking_predictor(rerank_alpha=0.3)
+    with reranking(predictor, False, 0.9) as inner:
+        assert inner.rerank is False
+        assert inner.rerank_alpha == 0.9
+    assert predictor.rerank is True
+    assert predictor.rerank_alpha == 0.3
+
+
+def test_reranking_context_manager_restores_state_on_error():
+    predictor = make_reranking_predictor()
+    with pytest.raises(RuntimeError):
+        with reranking(predictor, False):
+            raise RuntimeError("boom")
+    assert predictor.rerank is True
+
+
+def test_rerank_ablation_reports_both_arms_and_the_delta():
+    predictor = make_reranking_predictor()
+    result = rerank_ablation(predictor, TRAIN[:4], ks=(1, 3), limit=4)
+    for arm in ("off", "on"):
+        for task in ("next_word", "completion"):
+            assert "hit@1" in result[arm][task] and "hit@3" in result[arm][task]
+    for task in ("next_word", "completion"):
+        assert result["delta"][task]["hit@1"] == pytest.approx(
+            result["on"][task]["hit@1"] - result["off"][task]["hit@1"]
+        )
+
+
+def test_rerank_ablation_needs_a_tagger():
+    with pytest.raises(ValueError):
+        rerank_ablation(make_predictor(), TRAIN[:2])
+
+
+def test_ablation_leaves_the_predictor_as_it_found_it():
+    predictor = make_reranking_predictor(rerank_alpha=0.3)
+    rerank_ablation(predictor, TRAIN[:2], ks=(1,), limit=2, alpha=0.9)
+    assert predictor.rerank is True and predictor.rerank_alpha == 0.3
+
+
+def test_alpha_zero_row_of_the_sweep_matches_reranking_off():
+    predictor = make_reranking_predictor()
+    rows = alpha_sweep(predictor, TRAIN[:4], alphas=(0.0, 0.5), ks=(1, 3), limit=4)
+    with reranking(predictor, False):
+        baseline = hit_at_k(predictor, TRAIN[:4], ks=(1, 3), limit=4)
+    assert rows[0]["hit@1"] == pytest.approx(baseline["hit@1"])
+    assert rows[0]["hit@3"] == pytest.approx(baseline["hit@3"])
+
+
+def test_alpha_sweep_can_measure_completion_too():
+    predictor = make_reranking_predictor()
+    rows = alpha_sweep(
+        predictor, TRAIN[:4], alphas=(0.0, 0.3), ks=(1,), limit=4,
+        mode=Mode.COMPLETION,
+    )
+    assert [row["mode"] for row in rows] == ["completion", "completion"]
+    assert all("prefix_len" in row for row in rows)
+
+
+def test_tag_window_disagreement_separates_window_from_right_context():
+    predictor = make_reranking_predictor()
+    result = tag_window_disagreement(predictor, TRAIN[:5])
+    assert result["positions"] > 0
+    assert 0.0 <= result["vs_prefix"] <= 1.0
+    assert 0.0 <= result["vs_sentence"] <= 1.0
+    assert result["window"] == predictor.tag_context_size
+
+
+def test_a_window_as_long_as_the_sentence_never_disagrees_with_the_prefix():
+    # Sanity check that vs_prefix is measuring the window and nothing else.
+    predictor = make_reranking_predictor(tag_context_size=100)
+    assert tag_window_disagreement(predictor, TRAIN[:5])["vs_prefix"] == 0.0
+
+
+def test_typical_tag_agreement_is_a_rate():
+    predictor = make_reranking_predictor()
+    result = typical_tag_agreement(predictor, TRAIN[:5])
+    assert result["tokens"] > 0
+    assert 0.0 <= result["agreement"] <= 1.0
+    assert all(len(pair) == 2 for pair, _ in result["top_confusions"])
+
+
+# ------------------------------------------------------------- persistence
+
+def test_from_paths_loads_the_tagger(tmp_path):
+    model = NgramModel(order=3, smoothing="stupid_backoff").fit(TRAIN)
+    model_path = model.save(tmp_path / "model.pkl")
+    tagger_path = make_tagger().save(tmp_path / "tagger.pkl")
+
+    predictor = Predictor.from_paths(model_path, tagger_path=tagger_path)
+    assert predictor.rerank_active is True
+    assert predictor.typical_tag("report") == "NOUN"
+
+
+def test_reranking_survives_a_tagger_round_trip(tmp_path):
+    path = make_tagger().save(tmp_path / "tagger.pkl")
+    loaded = make_reranking_predictor(tagger=HMMTagger.load(path))
+    fresh = make_reranking_predictor()
+    assert [s.word for s in loaded.predict(["the"], k=5)] == [
+        s.word for s in fresh.predict(["the"], k=5)
+    ]
+
+
+# --------------------------------------------------------------- latency
+
+def test_reranking_stays_inside_the_debounce_budget():
+    # The whole point of a context-free candidate tag: reranking must not turn
+    # one decode per keystroke into one per candidate.
+    predictor = make_reranking_predictor()
+    contexts = [(["like", "to"], ""), (["the"], "re"), ([], "b")]
+    stats = latency_stats(predictor, contexts, repeats=20, percentiles=(95,))
+    assert stats["p95_ms"] < 50

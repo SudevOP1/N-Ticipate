@@ -96,6 +96,7 @@ REQUIRED_KEYS = [
     "hmm.split.train", "hmm.split.test", "hmm.split.seed",
     # Phase 6
     "reranking.enabled", "reranking.alpha", "reranking.tag_context_size",
+    "reranking.unknown_tag_penalty",
     # Phase 7
     "app.hotkeys.accept", "app.hotkeys.dismiss", "app.overlay.max_items",
     "app.capture.max_context_words", "app.capture.injection_method",

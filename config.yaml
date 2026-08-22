@@ -119,8 +119,30 @@ hmm:
 # ---------------------------------------------------------------- Phase 6
 reranking:
   enabled: true
-  alpha: 0.3 # weight on the POS term; alpha = 0 must reproduce Phase 3
-  tag_context_size: 2 # preceding tags conditioned on
+  # Weight on the POS term. alpha = 0 must reproduce the Phase 3 ranking
+  # exactly. Swept in notebook 06 on 400 held-out Brown sentences: hit@1 rises
+  # to a plateau over 0.1-0.3 and falls away past 0.5, but hit@5 decays
+  # monotonically from the start -- a heavy tag prior promotes grammatical
+  # words the language model had good reason to rank low. 0.1 is the corner:
+  # it takes the whole hit@1 gain (+1.1 points) while leaving hit@3 and hit@5
+  # where Phase 3 left them.
+  alpha: 0.1
+  # How many preceding *tokens* are decoded to get the conditioning tag -- not
+  # how many tags condition it. The HMM is a tag bigram, so the term is always
+  # P(tag | one preceding tag); this window only decides how much left context
+  # Viterbi sees when it picks that tag. Measured in notebook 06: a 2-token
+  # window picks a different tag from a full-buffer decode on 1.3% of
+  # positions, a 3-token window on 0.1%.
+  #
+  # Raising it past 2 changes nothing in the running app, though: predict()
+  # has already trimmed the context to the trigram model's two words, and the
+  # Phase 7 capture buffer (app.capture.max_context_words) holds two. 2 is
+  # therefore both the setting and the ceiling.
+  tag_context_size: 2
+  # Flat handicap on a candidate whose tag came from the suffix heuristic
+  # rather than from having been seen in the tagged corpus. Those guesses are
+  # wrong often enough that the POS term should not carry full weight, but the
+  # word is usually a real word, so this is a handicap, not a veto.
   unknown_tag_penalty: -2.0
 
 # ---------------------------------------------------------------- Phase 7

@@ -420,7 +420,218 @@ _(accuracy side-by-side with English, OOV rate, confused tag pairs)_
 
 ## Phase 6 — POS-aware reranking
 
-_(the ablation: hit@k with vs. without reranking)_
+Wires the Phase 4 tagger into the Phase 3 predictor. No new class: the reranker
+is a term inside `Predictor.predict()`, live only when a fitted `HMMTagger` is
+attached.
+
+```
+score(w) = log[ λ·P_user(w | h) + (1−λ)·P_base(w | h) ]  +  α·log P(tag(w) | tag(h₋₁))
+```
+
+Setup for every number below: pruned trigram model (stupid backoff) from Phase
+2, `hmm_english.pkl` from Phase 4, first 400 held-out Brown sentences — 7,888
+next-word positions and 5,380 completion positions (2 characters typed).
+Personalisation off, so the only thing moving between arms is the POS term.
+
+Three pieces, each with a different cost:
+
+| Piece | Source | Per keystroke |
+| --- | --- | --- |
+| context tag `tag(h₋₁)` | Viterbi over the last `tag_context_size` tokens | one 2-column trellis |
+| candidate tag `tag(w)` | context-free `argmax_t P(t \| w)` | one emission lookup per candidate |
+| the prior | the HMM's own transition matrix | one array index per candidate |
+
+The candidate is tagged **without** context deliberately: tagging it properly
+would mean one Viterbi decode per candidate, i.e. ~50 decodes per keystroke.
+
+### The ablation — the core deliverable (α = 0.1)
+
+| Mode | positions | | hit@1 | hit@3 | hit@5 |
+| --- | ---: | --- | ---: | ---: | ---: |
+| next word | 7,888 | rerank off | 16.13% | 29.06% | 35.17% |
+| | | **rerank on** | **17.20%** | 28.98% | 35.07% |
+| | | delta | **+1.08** | −0.08 | −0.10 |
+| completion | 5,380 | rerank off | 41.69% | 55.61% | 62.03% |
+| | | **rerank on** | **41.86%** | **55.87%** | **62.21%** |
+| | | delta | +0.17 | +0.26 | +0.19 |
+
+Keystroke savings, the headline product number: **40.45% → 40.57%**, i.e.
+unchanged (6,383 → 6,380 words accepted from a suggestion out of 7,888).
+
+The honest summary: **the POS term buys about a point of next-word hit@1 and a
+quarter of a point at most anywhere else.** That is a real result and it is the
+one the plan predicted might happen; it is not a failed experiment.
+
+Why the shape makes sense. In next-word mode the model ranks the continuations
+of a two-word context, many of them backed by thin trigram counts — the one
+place a grammatical prior has room to break a tie. In completion mode two typed
+characters have already narrowed the field far harder than "it should be a
+noun" can. And next-word hit@3/@5 slipping a tenth of a point while hit@1 gains
+a full one is the trade being made visible: reranking pulls grammatical words
+up, and a few correct answers get pushed down with them.
+
+### Choosing α
+
+| α | hit@1 | hit@3 | hit@5 |
+| ---: | ---: | ---: | ---: |
+| 0.0 | 16.13% | 29.06% | 35.17% |
+| 0.05 | 16.23% | 28.92% | 35.09% |
+| **0.1** | **17.20%** | 28.98% | 35.07% |
+| 0.2 | 17.18% | 29.01% | 34.91% |
+| 0.3 | 17.09% | 29.20% | 34.44% |
+| 0.5 | 16.71% | 28.68% | 33.91% |
+| 1.0 | 15.57% | 27.09% | 32.24% |
+| 2.0 | 14.36% | 24.99% | 29.27% |
+
+hit@1 has a plateau over 0.1–0.3; hit@5 decays monotonically from the first
+non-zero weight. `config.yaml` ships **α = 0.1**, the corner of the plateau: it
+takes the whole hit@1 gain while leaving hit@3/@5 within a tenth of a point of
+Phase 3. (0.3 was the initial guess in the config; the sweep is why it is not
+the shipped value.)
+
+α = 2 is worth keeping in the write-up as the failure mode — the tag term
+overrules the language model and accuracy falls below the Phase 3 baseline at
+every k. A reranker with too much authority stops being a reranker.
+
+`α = 0` reproduces the Phase 3 ranking *exactly* (the log is monotonic), which
+is asserted in the notebook and in `tests/test_predictor.py`. That is what
+makes the two arms of the table above comparable.
+
+### Bug found — the buffer has not ended
+
+The obvious way to get the context tag is `tagger.viterbi(window)[-1]`. It is
+wrong. `viterbi()` decodes a finished *sentence*, so it adds the transition
+into the end-of-sentence state — and a buffer the user is still typing has not
+ended.
+
+That term is not small. The end state is reached almost only from punctuation:
+on this tagger `log P(end | .) = −1.11` against `log P(end | VERB) = −13.90`,
+a gap of nearly 13 nats against a trellis column that only favoured `VERB` over
+`.` by about 9. So `i would` came back tagged `PRON .` — the model preferring
+to believe `would` was a full stop over believing the sentence continued — and
+every suggestion after a verb was scored against the transitions *out of
+punctuation*.
+
+The fix is to take the arg-max of the last trellis column and never apply
+`log_final`. It moved every number in the phase:
+
+| Measure | with the end transition | without |
+| --- | ---: | ---: |
+| next-word hit@1 (α = 0.1) | 17.19% | 17.20% |
+| completion hit@5 (α = 0.1) | 61.99% (−0.04 vs. Phase 3) | 62.21% (+0.19) |
+| windowed vs. full-sentence tag | 38.8% | 8.07% |
+
+The hit@1 column barely moved, which is the interesting part: the headline
+number would have looked fine and the defect would have shipped. It showed up
+only because section 2 of the notebook prints the context tag for a worked
+example, where `i would → .` is obviously nonsense. Pinned by
+`test_context_tag_does_not_charge_the_end_of_sentence_transition`, which forces
+the end distribution onto one tag and checks that `context_tag` ignores it.
+
+### The ceiling: how good is the context-free candidate tag?
+
+Against the tag the same tagger assigns *with* the sentence in front of it:
+
+| | agreement |
+| --- | ---: |
+| all candidates | 92.99% |
+| words seen in training | 96.77% |
+| (unseen tokens in the sample) | 1,295 / 7,888 = 16.4% |
+
+Top disagreements, in-context → context-free guess: `ADJ→NOUN` (132),
+`VERB→NOUN` (127), `NOUN→VERB` (43), `NUM→NOUN` (38). The shape is exactly what
+the arg-max of `P(t|w)` should produce: `NOUN` is the largest tag in English by
+a wide margin, so any word whose distribution is close to balanced (`report`,
+`record`, `use`) defaults towards it. Those are precisely the words a
+context-sensitive decision would get right.
+
+So the shortcut is *not* what is limiting the phase — 93% is a high ceiling.
+The limit is the alphabet: twelve tags cannot say much about which of fifty
+English words comes next.
+
+A visible instance in the notebook: after `i would`, `like` is tagged `ADP`,
+because across the corpus `like` really is a preposition more often than a
+verb, and it gets demoted for it.
+
+### The tagging window
+
+`context_tag` decodes only the last few tokens. Two different losses, kept
+apart because lumping them together overstates the approximation by an order of
+magnitude:
+
+| window | vs. full-buffer decode | vs. full-sentence decode |
+| ---: | ---: | ---: |
+| 1 | 7.86% | 11.25% |
+| **2** | **0.66%** | 8.07% |
+| 3 | 0.07% | 8.03% |
+| 5 | 0.00% | 8.03% |
+| whole buffer | 0.00% | 8.03% |
+
+The first column is the window's own cost and it is already negligible at 2.
+The second is the missing right context, which no window can fix: those words
+have not been typed when the suggestion has to be drawn.
+
+Raising `tag_context_size` past 2 also does nothing in the running app —
+`predict()` has already trimmed the context to the trigram model's two words,
+and the Phase 7 capture buffer holds two for the same reason. 2 is both the
+setting and the ceiling; the table above only moves because the eval helper
+feeds whole prefixes directly.
+
+### Cost
+
+| Arm | mean | p50 | p95 | p99 |
+| --- | ---: | ---: | ---: | ---: |
+| rerank off | 0.58 ms | 0.64 ms | 1.21 ms | 2.61 ms |
+| rerank on | 0.67 ms | 0.72 ms | 1.11 ms | 2.64 ms |
+| rerank on, cold caches | 0.69 ms | 0.73 ms | 1.37 ms | 2.84 ms |
+
+Roughly 0.1 ms of a 50 ms budget, most of it the per-candidate emission
+lookups rather than the trellis. Caches after 600 calls: 275 context windows,
+4,351 words — small enough that cold and warm are within noise of each other,
+which is itself the argument that the context-free candidate tag was the right
+call. (Absolute latency on this machine varies by up to 4× with background
+load; the *ratio* between arms is the number to trust.)
+
+### Negative result: truecasing the context before tagging
+
+The corpus is lowercased for counting, the tagger was trained on cased Treebank
+text, so 20.3% of test tokens are unknown to the tagger purely from case;
+running them through the Phase 1 truecase map first brings that to 17.7%. It
+does not help:
+
+| context fed to the tagger | hit@1 | hit@3 | hit@5 | tag agreement |
+| --- | ---: | ---: | ---: | ---: |
+| lowercased (shipped) | 17.20% | 28.98% | 35.07% | 92.99% |
+| truecased | 17.14% | 28.97% | 35.04% | 92.61% |
+
+Slightly worse on every column, so no code change. The likely reason is that
+the hapax prior plus the suffix heuristics already handle a lowercased proper
+noun about as well as a mis-truecased one, and the truecase map introduces its
+own errors. Worth one line in the report as a hypothesis that was tested and
+dropped.
+
+### What would actually be worth doing next
+
+In order of expected value, none of them tuning α further:
+
+1. **A larger tagged corpus.** The tagger has ~100k tokens of Treebank sample;
+   the language model has ~1M tokens of Brown. The tag prior is the weaker
+   estimate by an order of magnitude.
+2. **A tag trigram.** `P(tag | two preceding tags)` separates `DET ADJ ___`
+   from `ADP DET ___`; the bigram cannot. That is a change to `HMMTagger`, not
+   to the predictor.
+3. **Contextual candidate tagging**, if it can be made cheap — worth at most
+   the 7% the shortcut currently loses.
+
+Artefacts: no new model files — Phase 6 composes `ngram_trigram_pruned.pkl` and
+`hmm_english.pkl`. New config: `reranking.alpha = 0.1` (was 0.3),
+`reranking.tag_context_size = 2` with the ceiling documented.
+
+Tests: 484 passing, 1 skipped (36 new, all in `tests/test_predictor.py` except
+one config key).
+Deliverable notebook: `notebooks/06_pos_reranking.ipynb` (executed — worked
+scoring example, α = 0 identity check, ablation, α sweep and plot, tag-guess
+agreement, window table, latency).
 
 ## Phase 7 — Desktop app
 
