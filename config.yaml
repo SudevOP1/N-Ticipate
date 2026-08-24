@@ -148,7 +148,17 @@ reranking:
 # ---------------------------------------------------------------- Phase 7
 app:
   enabled_on_start: true
-  language: english
+  language: english # which HMM tagger reranks; the n-gram model is English
+
+  # Artefacts the app loads at start-up. Only the n-gram model is required --
+  # with no tagger the predictor is exactly Phase 3, which is a working app.
+  # The corpus is loaded for its truecase map alone, so the overlay can show
+  # "India" rather than the lowercased form the counts are kept in.
+  models:
+    ngram: data/models/ngram_trigram_pruned.pkl
+    corpus: data/processed/brown.json
+    tagger: data/models/hmm_english.pkl
+    tagger_hindi: data/models/hmm_hindi.pkl
 
   hotkeys:
     accept: tab
@@ -166,6 +176,23 @@ app:
     context_reset_keys: [enter, tab, escape]
     max_context_words: 2 # trigram model needs only the last two
     injection_method: type # type | clipboard
+    append_space: true # a suggestion is a finished word; the space follows
+    # The buffer is cleared at every sentence end, so this cap is only reached
+    # by a very long sentence. It exists so a runaway paste or a document with
+    # no punctuation cannot grow the one object that holds what the user typed.
+    max_buffer_chars: 200
+    # Devanagari does not use the full stop, and Phase 5's model is trained on
+    # sentences that end with a danda -- so both are boundaries here.
+    sentence_end_chars: ".!?।॥"
+
+  # The personalization layer from Phase 3 improves with use, but it improves
+  # by storing what the user wrote. That is compatible with the privacy rules
+  # below only if it is deliberate, so it stays off until the user turns on
+  # "Learn from my typing" in the tray menu. What gets saved is the profile's
+  # n-gram counts, never the keystroke stream.
+  learning:
+    enabled: false
+    autosave_every: 200 # tokens learned between profile saves
 
   privacy:
     # Hard requirements, not preferences. Nothing leaves the machine.

@@ -77,10 +77,13 @@ nticipate/
   predictor.py            Phases 3 + 6
   hmm.py                  Phases 4 + 5
   app/
-    tray.py               Phase 7
-    hooks.py              Phase 7
-    overlay.py            Phase 7
-    injector.py           Phase 7
+    __main__.py           Phase 7  entry point: tray | --editor | --check
+    tray.py               Phase 7  tray icon + the object that wires it all up
+    hooks.py              Phase 7  context buffer, key router, debouncer, hook
+    overlay.py            Phase 7  the frameless, never-focusable popup
+    injector.py           Phase 7  typing / pasting an accepted suggestion
+    win32.py              Phase 7  ctypes: caret, window styles, clipboard
+    editor.py             Phase 7  the fallback editor window
 data/raw|processed|models
 notebooks/                01..06, one per phase deliverable
 tests/                    pytest, one module per source module
@@ -232,6 +235,15 @@ NLP component correctly, and costs no lab marks.
 **Done when:** suggestions appear and accept correctly in Notepad and in one
 browser, without focus theft.
 
+**Built.** Six modules plus an entry point; measured numbers in
+`report/notes.md`. p95 prediction latency 5.4 ms against a 50 ms budget,
+keystroke savings 27.4% end to end. Caret positioning confirmed working in
+Notepad and confirmed unavailable in Chromium-class windows (mouse fallback).
+The overlay's `WS_EX_NOACTIVATE` / `WS_EX_TOOLWINDOW` / `WS_EX_TOPMOST` styles
+are asserted programmatically. The editor fallback was written anyway, because
+it is the demo that cannot fail. Outstanding: the by-hand check in Notepad and
+a browser with the hook actually running.
+
 ## Phase 8 — Evaluation, packaging, report
 
 Bundle with PyInstaller into a single `.exe` with the pruned model embedded.
@@ -266,5 +278,5 @@ editor-window fallback still delivers every required NLP component.
 | 4     | HMM tagger, English      | **done**    |
 | 5     | HMM tagger, Hindi        | **done**    |
 | 6     | POS-aware reranking      | **done**    |
-| 7     | Desktop app              | not started |
+| 7     | Desktop app              | **done**    |
 | 8     | Evaluation and packaging | not started |

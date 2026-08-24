@@ -635,7 +635,148 @@ agreement, window table, latency).
 
 ## Phase 7 — Desktop app
 
-_(apps tested, caret-positioning successes and failures)_
+Six modules under `nticipate/app/`: `win32.py` (ctypes helpers), `hooks.py`
+(capture), `overlay.py` (the popup), `injector.py` (typing the completion),
+`tray.py` (the tray icon and the object that wires everything together), and
+`editor.py` (the fallback window). Entry point `python -m nticipate.app`, with
+`--editor` and `--check`.
+
+No new NLP. Phase 7 consumes `Predictor.suggest()` exactly as Phase 6 left it;
+everything measured below is the cost of the shell around it.
+
+### End-to-end latency
+
+148 held-out Brown sentences replayed keystroke by keystroke through the real
+pipeline (`ContextBuffer` → `Predictor.suggest` → overlay), one prediction per
+keystroke — i.e. the debouncer disabled, which is the worst case it exists to
+prevent.
+
+| Metric | Value | Budget |
+| --- | ---: | ---: |
+| Predictions | 11,014 | — |
+| p50 | **1.39 ms** | — |
+| p95 | **5.40 ms** | 50 ms |
+| p99 | 8.52 ms | — |
+| max | 56.96 ms | — |
+| mean | 1.81 ms | — |
+
+p95 is 9× inside the debounce window, so the debouncer is saving work rather
+than saving the deadline. The single 57 ms outlier is one sample in 11,014 and
+is a GC pause, not a slow context — it is the only sample above 20 ms.
+
+### The first prediction is 300× slower than the rest
+
+| | ms |
+| --- | ---: |
+| Model load + app construction | 609 |
+| First (cold) prediction | 363 |
+| Steady-state prediction | 1.4 |
+
+The cold call pays for NLTK's tokenizer load and the n-gram model's lazy
+context index. This was found by measuring a fresh app after three keystrokes
+and getting a p50 of 520 ms — an apparent 10× budget violation that was
+entirely start-up cost. `NticipateApp.warmup()` now runs one throwaway
+prediction before the hook starts and discards its timing, so the user's first
+keystroke sees the warm path and the reported p95 describes typing rather than
+launching.
+
+Process RSS with the trigram model, the trie and the English tagger resident:
+**199 MB**.
+
+### Keystroke savings, in the app rather than in the notebook
+
+Same replay, accepting the top suggestion whenever it matched the word being
+typed (at least one character typed first, so this is the completion mode only):
+
+| | |
+| --- | ---: |
+| Keystrokes typed | 11,014 |
+| Keystrokes saved | 4,149 |
+| Accepts | 1,904 |
+| **Savings ratio** | **27.4%** |
+
+Comparable to the Phase 3 figure, as it should be — the app changes nothing
+about the ranking. The difference is that this number counts the Tab press as
+a keystroke, which the pure-model measurement does not.
+
+### Caret positioning: where it works and where it does not
+
+`GetGUIThreadInfo` returns a caret rectangle for classic Win32 edit controls
+and nothing for anything that draws its own text. Measured by launching each
+app and querying the foreground window:
+
+| Application | Focused window class | Caret | Anchor used |
+| --- | --- | --- | --- |
+| Notepad | `RichEditD2DPT` | **yes** — `Rect(77, 310, 78, 331)` | caret |
+| VS Code (Electron) | `Chrome_RenderWidgetHostHWND` | no | mouse |
+| Counter-Strike 2 (SDL) | `SDL_app` | no | mouse |
+
+Chrome, Edge and Firefox are **not yet measured** — the browser launched for
+the test never took the foreground, so the run was discarded rather than
+written up. Chromium browsers use the same `Chrome_RenderWidgetHostHWND` class
+as the VS Code row, so the expectation is that they behave identically, but
+that is an inference and the manual check in a browser is still outstanding.
+
+This is the phase's honest limitation. Those classes are listed in
+`win32.OPAQUE_WINDOW_CLASSES` and answered with "unknown" rather than with the
+stale rectangle the API happily returns for them, so the overlay falls back to
+the mouse cursor instead of appearing in the wrong place with confidence.
+
+### Focus theft
+
+The failure that makes this class of tool unusable. Three things prevent it and
+all three are needed: `overrideredirect(True)`, `WS_EX_NOACTIVATE` applied to
+the top-level HWND after Tk creates it, and never binding focus to the overlay.
+Verified programmatically: after `show()` the overlay is mapped
+(`76x70+772+452`, mouse-anchored) and its extended style has `WS_EX_NOACTIVATE`,
+`WS_EX_TOOLWINDOW` and `WS_EX_TOPMOST` all set. The by-hand check — typing in
+Notepad and in a browser with the tray app running, confirming the caret never
+moves — is the phase's remaining manual step.
+
+### Privacy
+
+The plan's hard requirements, and how each is enforced rather than configured:
+
+| Requirement | Enforcement |
+| --- | --- |
+| Nothing transmitted | No network code anywhere in `nticipate/`; `telemetry: false` |
+| Buffer never on disk | `ContextBuffer` has no `save`/`to_dict`/`write` — asserted by a test |
+| Buffer holds one sentence | Cleared at `.!?।॥`, capped at 200 chars |
+| No leak via logs | `__repr__` reports lengths, not contents — asserted by a test |
+| Password fields | `CapturePolicy` blocks capture *and clears the buffer* |
+
+The password check is genuinely partial and is reported as such: `ES_PASSWORD`
+is readable on Win32 edit controls, and browsers expose nothing, so an unknown
+falls back to a window-title heuristic (`sign in`, `password`, …). A browser
+password box in a page with an uninformative title will not be detected.
+
+Personalization is the one feature that writes what the user typed to disk, so
+it is **off by default** (`app.learning.enabled: false`) and turned on from the
+tray menu. What is saved is the profile's n-gram counts, never the keystroke
+stream.
+
+Windows Defender may flag the global hook: `pynput.keyboard.Listener` installs
+a low-level keyboard hook, which is structurally what a keylogger installs.
+Develop inside an exclusion folder and disclose it in the write-up — the
+mitigation is disclosure, not evasion.
+
+### The fallback was built anyway
+
+`python -m nticipate.app --editor` opens a Tk editor with live suggestions,
+using the same predictor and the same accept arithmetic, without `pynput`,
+without a hook and without caret guessing. It was written even though the hook
+works, because it is the demo that cannot fail in front of an examiner. Same
+measured latency (mean 1.5 ms over a session), and it shows each suggestion's
+POS tag, which the overlay does not.
+
+Artefacts: no new model files. New config keys: `app.models.*`,
+`app.capture.{append_space, max_buffer_chars, sentence_end_chars}`,
+`app.learning.{enabled, autosave_every}`.
+
+Tests: 594 passing, 1 skipped (113 new, `tests/test_app.py` plus config-key
+assertions in `test_phase0_setup.py`). No notebook — Phase 7's deliverable is
+the running app, and the numbers above come from a replay harness rather than
+from a per-phase notebook.
 
 ## Phase 8 — Packaging
 

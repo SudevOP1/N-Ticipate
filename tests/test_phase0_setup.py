@@ -98,8 +98,16 @@ REQUIRED_KEYS = [
     "reranking.enabled", "reranking.alpha", "reranking.tag_context_size",
     "reranking.unknown_tag_penalty",
     # Phase 7
-    "app.hotkeys.accept", "app.hotkeys.dismiss", "app.overlay.max_items",
-    "app.capture.max_context_words", "app.capture.injection_method",
+    "app.enabled_on_start", "app.language",
+    "app.models.ngram", "app.models.corpus", "app.models.tagger",
+    "app.models.tagger_hindi",
+    "app.hotkeys.accept", "app.hotkeys.dismiss", "app.hotkeys.toggle",
+    "app.overlay.max_items", "app.overlay.font_size", "app.overlay.theme",
+    "app.overlay.offset_x", "app.overlay.offset_y",
+    "app.capture.context_reset_keys", "app.capture.max_context_words",
+    "app.capture.injection_method", "app.capture.append_space",
+    "app.capture.max_buffer_chars", "app.capture.sentence_end_chars",
+    "app.learning.enabled", "app.learning.autosave_every",
     "app.privacy.disable_in_password_fields",
     "app.privacy.log_keystrokes_to_disk", "app.privacy.telemetry",
     # Phase 8
