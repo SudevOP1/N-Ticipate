@@ -28,8 +28,12 @@ preprocessing:
   tokenizer: nltk # nltk | regex  (regex works with no corpora downloaded)
   sentence_splitter: punkt # punkt | regex
 
-  min_token_freq: 2 # tokens rarer than this become <UNK>
-  max_vocab_size: 50000 # 0 = unlimited
+  min_token_freq: 3 # tokens rarer than this become <UNK>. Raised from 2
+  # with the move off Brown: on a 6M-token web corpus the hapax tail is
+  # mostly typos and scrape debris, and every one of them was a candidate
+  # the trie could offer.
+  max_vocab_size: 80000 # 0 = unlimited. Brown only had 56k types; the
+  # modern corpus has more real vocabulary worth keeping.
   unk_token: "<UNK>"
   bos_token: "<s>"
   eos_token: "</s>"
@@ -60,7 +64,12 @@ ngram:
     max_continuations: 50 # cap successors stored per context
 
   corpus:
-    english: brown # nltk corpus name, or a path under data/raw
+    # Was `brown`. Brown is 1961 edited American prose, 1.1M tokens: the
+    # register is wrong for a typing assistant and the trigram table is
+    # too sparse to cover what a user actually types. Rebuilt by
+    # scripts/fetch_data.py from HuggingFaceFW/fineweb-edu (modern web
+    # prose) plus knkarthick/dialogsum (messenger-style dialogue).
+    english: data/raw/modern_english.txt
     fallback_file: data/raw/sample_english.txt
 
 # ---------------------------------------------------------------- Phase 3
@@ -106,10 +115,15 @@ hmm:
   # never in the shipped prediction path
 
   corpora:
-    english: data/raw/sample_tagged_english.conll
-    hindi: data/raw/sample_tagged_hindi.conll
-    english_nltk: treebank # preferred when the corpus is downloaded
-    hindi_nltk: indian
+    english: data/raw/ud_english.conll
+    hindi: data/raw/ud_hindi.conll
+    # Empty on purpose. load_tagged_sentences() prefers the NLTK corpus
+    # when this is set, which would silently override the UD files above.
+    # NLTK treebank is WSJ newswire and NLTK `indian` is ~10k Hindi
+    # tokens; UD English-EWT/GUM is web text (the domain the app runs in)
+    # and UD Hindi-HDTB is ~280k tokens.
+    english_nltk: ""
+    hindi_nltk: ""
 
   split:
     train: 0.8
@@ -156,7 +170,7 @@ app:
   # "India" rather than the lowercased form the counts are kept in.
   models:
     ngram: data/models/ngram_trigram_pruned.pkl
-    corpus: data/processed/brown.json
+    corpus: data/processed/modern.json
     tagger: data/models/hmm_english.pkl
     tagger_hindi: data/models/hmm_hindi.pkl
 

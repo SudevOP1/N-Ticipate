@@ -14,6 +14,146 @@ this file rather than re-running everything at the deadline.
 
 Environment status: run `python setup_env.py --check`.
 
+## Corpus swap — Brown → modern web + dialogue
+
+Phases 0–7 were built on NLTK Brown (1961, edited American prose, 1.16M
+tokens) and NLTK `treebank` / `indian` for the taggers. Every metric was
+green and the app still felt wrong to use, which is the whole reason this
+section exists: perplexity and hit@k were measuring how well the model
+predicted *Brown*, and that was never the question. Typing at it turned up
+suggestions no 2026 user would accept — `can you pl` ranked `place, play,
+plan` and had no `please` at any rank, and `Internet` was not in the
+vocabulary. The measured before/after is at the end of this section.
+
+The NLP code is unchanged. Only the corpora, three config paths and the
+pruning/vocab thresholds moved. `scripts/fetch_data.py` downloads and cleans;
+`scripts/retrain.py` re-runs Phases 1, 2, 4 and 5 and writes the artefacts.
+
+| Role                | Was                       | Now                                              |
+| ------------------- | ------------------------- | ------------------------------------------------ |
+| Language model      | NLTK Brown                | HuggingFaceFW/fineweb-edu (`sample-10BT`, streamed) + knkarthick/dialogsum |
+| Tagged English      | NLTK `treebank` (WSJ)     | UD English-EWT + UD English-GUM (web, blog, review, email) |
+| Tagged Hindi        | NLTK `indian` (~10k tok)  | UD Hindi-HDTB                                    |
+
+Why those three:
+
+- **fineweb-edu** is modern web prose that has already been quality-filtered
+  and deduplicated, so the cleaning left to do is line-level, not
+  document-level. Streamed rather than downloaded — one shard is 2.15 GB and
+  the run needs ~6M tokens of it.
+- **dialogsum** is messenger-style dialogue, plain CSV, no loading script. It
+  supplies the register the app actually runs in and that fineweb has almost
+  none of: `let me know`, `see you tomorrow`, `can you please`. DailyDialog
+  would have been the better-known choice, but every copy of it on the Hub is
+  script-based and `datasets` 5.x no longer executes loading scripts.
+- **Universal Dependencies** for the taggers, taken from the UD GitHub repos
+  as `.conllu` rather than the Hub, because the Hub's `universal_dependencies`
+  is also script-based. EWT/GUM is the domain the app runs in; HDTB is 30x the
+  Hindi data NLTK `indian` had, which is what finally made
+  `data/models/hmm_hindi.pkl` worth building.
+
+### Phase 1 — preprocessing, before and after
+
+| Metric              | Brown (train) | Modern (train) |
+| ------------------- | ------------: | -------------: |
+| Sentences           |        45,610 |        400,836 |
+| Tokens              |       927,438 |      6,727,692 |
+| Types               |        24,634 |         51,028 |
+| Type-token ratio    |        0.0266 |         0.0076 |
+| OOV rate on dev     |         3.68% |      **2.07%** |
+| Processed corpus    |       11.8 MB |        77.1 MB |
+| Pipeline runtime    |         4.8 s |         56.6 s |
+
+`min_token_freq` went 2 → 3 and `max_vocab_size` 50,000 → 80,000 with the
+swap. On a web corpus the hapax tail is mostly typos and scrape residue, and
+every one of those was a word the trie could offer; the extra vocabulary
+headroom is for real words the larger corpus actually supports.
+
+The OOV rate falling from 3.68% to 2.07% on 7x the data is the number that
+predicts the qualitative change: a third fewer of the words a user types are
+ones the model has never seen.
+
+### Phase 2 — n-gram model
+
+| Metric                      |   Brown |   Modern |
+| --------------------------- | ------: | -------: |
+| n-grams before pruning      | 1,050,690 | 5,278,151 |
+| n-grams after pruning       | 151,014 |  862,252 |
+| Shipped model size          | 2.26 MB |  12.5 MB |
+| Dev perplexity (pruned)     |   502.7 |    320.2 |
+
+The perplexities are not directly comparable — different test sets — but they
+are both "trigram, stupid backoff, pruned, measured on held-out text from the
+same corpus", so the pair still says the modern model is not paying for its
+larger vocabulary with a worse fit.
+
+### Phase 3 — prediction accuracy, before and after
+
+Held-out test sentences, 600-sentence sample, personalisation off, reranking
+on at α = 0.1.
+
+| Evidence available        | hit@1 (Brown → modern) | hit@3 | hit@5 |
+| ------------------------- | ---------------------: | ----: | ----: |
+| Next-word (0 chars)       |    16.7% → **19.2%**   | 29.0% → **32.1%** | 34.8% → **38.1%** |
+| Completion, 1 char        |    34.6% → **37.2%**   | 48.2% → **51.0%** | 53.0% → **55.3%** |
+| Completion, 2 chars       |    40.2% → **46.0%**   | 53.6% → **57.9%** | 58.8% → **63.4%** |
+| Completion, 3 chars       |    46.1% → **51.8%**   | 65.5% → **70.0%** | 74.3% → **77.3%** |
+
+Keystroke savings: **40.4% → 42.7%** (4,748 words simulated, acceptance rate
+80.5%).
+
+Latency, still far inside the 50 ms budget but no longer free — the model is
+5.5x larger:
+
+| Mode       | p50 (Brown → modern) | p95 |
+| ---------- | -------------------: | --: |
+| Next-word  |    0.65 → 0.70 ms    | 0.72 → 0.86 ms |
+| Completion |    0.43 → 0.73 ms    | 1.08 → 2.15 ms |
+
+### What the swap actually changed, side by side
+
+Both rows below are the same predictor with the same UD-trained tagger
+attached (α = 0.1, personalisation off); only the n-gram model and its corpus
+differ. The Brown model was rebuilt for this table rather than quoted from
+memory.
+
+| Context + prefix  | Brown model                          | Modern model                            |
+| ----------------- | ------------------------------------ | --------------------------------------- |
+| `let me` + `k`    | know, knew, kind, known, keep        | know, known, keep, kind, King            |
+| `see you` + `tom` | tomorrow, Tom, Tommy, tomb, Tom's    | tomorrow, Tom, tomatoes, tomato, tomb    |
+| `can you` + `pl`  | place, play, plan, placed, planning  | **please**, place, play, plants, plant   |
+| `how are` + ``    | you, not, the, in, a                 | you, your, things, they, not             |
+| `thank` + `y`     | you, your, years, year, yet          | you, your, years, year, yes              |
+| `talk to` + `y`   | you, years, your, year, yet          | you, your, years, year, yes              |
+| `on the` + ``     | other, basis, ground, floor, part    | other, **Internet**, ground, basis, surface |
+
+Worth being precise about this, because the honest version is less dramatic
+than the complaint that prompted the swap. Brown is not incoherent — it gets
+`let me know` and `see you tomorrow` right, and on those two rows the
+difference is nil. What it does not have is:
+
+1. **Conversational fixed phrases.** `can you please` does not occur in 1961
+   news and fiction, so `please` is not a candidate at any rank. This is the
+   clearest single case and it is the shape of the failure the app was showing.
+2. **Modern vocabulary.** `on the Internet` is the second-ranked continuation
+   in the new model and is not in Brown's vocabulary at all.
+3. **Useful mass in the tail.** Brown fills ranks 2–5 of `how are ___` with
+   `not, the, in, a` — function words that would never be worth accepting.
+   The modern model spends the same slots on `your, things, they`.
+
+The lesson for the write-up is about evaluation, not about Brown: hit@k and
+perplexity measured on held-out text *from the same corpus* cannot see a
+domain mismatch, because the held-out text shares it. Only running the app
+against real typing exposed it, which is an argument for Phase 7 existing at
+all.
+
+### Cost paid
+
+Startup grew: `Corpus.load()` on a 77.1 MB JSON is ~2.4 s of the app's ~3.1 s
+model load. The app reads that file for the truecase map alone. A truecase-only
+artefact would take it back under a second and is the obvious next
+optimisation; it is not done yet.
+
 ## Phase 1 — Preprocessing
 
 Corpus: NLTK Brown, read via `.sents()`. Config as committed
@@ -416,7 +556,75 @@ heatmap, hand trellis, underflow curve, k sweep, ablation, confusion matrix).
 
 ## Phase 5 — HMM tagger, Hindi
 
-_(accuracy side-by-side with English, OOV rate, confused tag pairs)_
+Corpus: UD Hindi-HDTB (train + dev), converted to two-column `word<TAB>UPOS`
+by `scripts/fetch_data.py`. English is UD English-EWT (train + dev) plus UD
+English-GUM, same conversion. Both replaced the NLTK corpora — `indian` is
+~10k Hindi tokens, which was too small to say anything, and `treebank` is WSJ
+newswire, the wrong domain for an app that runs inside a browser.
+
+`HMMTagger` is unchanged between the two rows below. Only the corpus differs,
+plus the Devanagari branch of the suffix heuristic.
+
+| Metric                     |    English |     Hindi |
+| -------------------------- | ---------: | --------: |
+| Sentences                  |     25,856 |    14,965 |
+| Tokens                     |    429,831 |   316,274 |
+| Types                      |     31,333 |    17,993 |
+| Type-token ratio           |     0.0729 |    0.0569 |
+| Tags in the tagset         |         17 |        16 |
+| Train / test sentences     | 20,684 / 5,172 | 11,972 / 2,993 |
+| **Accuracy**               | **93.48%** | **94.72%** |
+| — on known words           |     94.32% |    95.50% |
+| — on unseen words          |     70.66% |    67.86% |
+| OOV rate (held-out)        |      3.54% |     2.81% |
+| Most-frequent-tag baseline |     88.76% |    92.26% |
+| Model size                 |     4.1 MB |    2.4 MB |
+| Fit time                   |      2.3 s |     1.6 s |
+
+Both beat their baseline, which is Phase 5's acceptance criterion.
+
+### Hindi scores *higher* than English, and the OOV rate says why
+
+This is the opposite of the result the plan expected, and the explanation is
+the same one either way: the language with more of its held-out text unseen is
+the one that scores lower. Here that is English — 3.54% OOV against Hindi's
+2.81%, and TTR 0.073 against 0.057. HDTB is newswire with a narrow vocabulary;
+EWT/GUM is email, blogs, reviews and forum posts, where the vocabulary is
+wider and the spelling less consistent. English also has a harder tagset
+distinction to make (see the confusion pairs below).
+
+On the unseen words themselves the ordering flips back — English 70.66%
+against Hindi 67.86% — which is what the suffix heuristic predicts: English
+inflection is suffixal and shallow (`-ing`, `-ed`, `-ly`, `-tion`), Hindi
+inflection is richer and more of it is carried by postpositions written as
+separate tokens.
+
+`tests/test_hmm.py::test_the_accuracy_gap_between_languages_tracks_the_oov_rate`
+pins the *relationship* rather than the winner, so swapping either corpus
+cannot quietly invalidate this paragraph.
+
+### Most-confused tag pairs (gold → predicted, held-out)
+
+| English            | count | Hindi              | count |
+| ------------------ | ----: | ------------------ | ----: |
+| PROPN → NOUN       |   483 | NOUN → PROPN       |   647 |
+| VERB → AUX         |   365 | PROPN → NOUN       |   485 |
+| VERB → NOUN        |   362 | VERB → AUX         |   289 |
+| NOUN → PROPN       |   307 | ADP → ADV          |   228 |
+| SCONJ → ADP        |   284 | NOUN → ADJ         |   194 |
+| NOUN → VERB        |   274 | PROPN → ADJ        |   149 |
+
+The NOUN/PROPN confusion dominates both languages and for different reasons.
+English has a capitalisation cue that the tagger can use and that sentence
+starts destroy; Devanagari has no case at all, so the only evidence for PROPN
+is the transition matrix and whatever the word itself was seen as. That is
+why the pair runs both directions in Hindi and is the single largest error
+class there.
+
+VERB → AUX is shared, and is a genuine tagset difficulty rather than a model
+failure: UD splits the auxiliary off the main verb, so `है`/`है` and `have`
+are the same surface word in both readings and only the context separates
+them — exactly the case a tag bigram is weakest at.
 
 ## Phase 6 — POS-aware reranking
 

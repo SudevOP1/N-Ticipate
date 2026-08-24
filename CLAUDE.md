@@ -22,7 +22,16 @@ The venv is at `.venv/` (Windows layout — `.venv/Scripts/python.exe`).
 
 python setup_env.py            # create data dirs + download NLTK corpora
 python setup_env.py --check    # report status only, download nothing
+
+python scripts/fetch_data.py                 # download the training corpora
+python scripts/fetch_data.py --skip-lm       # tagged corpora only (fast)
+.venv/Scripts/python.exe scripts/retrain.py  # rebuild every shipped artefact
+.venv/Scripts/python.exe scripts/retrain.py --only english
 ```
+
+`fetch_data.py` needs `datasets` (streams fineweb-edu) and takes a few minutes;
+`retrain.py` re-runs Phases 1, 2, 4 and 5 and takes ~2 minutes at the default
+corpus size. Neither imports anything the app imports at runtime.
 
 There is no pytest config file, no linter, and no build step. Run pytest and notebooks from the project root so `import nticipate` resolves.
 
@@ -44,6 +53,8 @@ One module per phase, all under `nticipate/`:
 | `app/win32.py` | 7 | ctypes: caret rect, window styles, clipboard, password detection |
 | `app/tray.py` | 7 | `NticipateApp` (the wiring) + `TrayIcon` (pystray) |
 | `app/editor.py` | 7 | `EditorApp` — the Tk fallback window |
+| `scripts/fetch_data.py` | 8 | Downloads + cleans the corpora into `data/raw/` |
+| `scripts/retrain.py` | 8 | Re-runs Phases 1, 2, 4, 5 and writes every shipped artefact |
 
 Data flow: raw text → `Corpus` (JSON in `data/processed/`) → `NgramModel` (pickle in `data/models/`) → `Trie` + `UserProfile` → `Predictor`. `HMMTagger` trains on a separate tagged corpus (`.conll` in `data/raw/`, or NLTK `treebank`/`indian`) and joins the pipeline in Phase 6, where it reranks the predictor's candidates.
 
@@ -63,6 +74,19 @@ These are documented in module docstrings and measured in `report/notes.md`. Do 
 
 - **Stopwords and punctuation are kept.** Removing them is right for classification and wrong for language modelling — `of the` is exactly what a bigram model must predict.
 - **Counting is lowercased; output is truecased.** `build_truecase_map` restores natural casing at suggestion time so counts aren't split across surface forms.
+- **The corpora are not NLTK's any more.** Brown / `treebank` / `indian` were
+  swapped for fineweb-edu + dialogsum (language model) and Universal
+  Dependencies EWT/GUM/HDTB (taggers) after Phase 7 showed the 1961 register
+  producing suggestions nobody would accept. `hmm.corpora.*_nltk` are
+  deliberately empty strings — `load_tagged_sentences()` prefers the NLTK
+  corpus whenever they are set, which would silently override the UD files.
+  Rationale and measured before/after live under "Corpus swap" in
+  `report/notes.md`.
+- **Hindi now scores *higher* than English (94.7% vs 93.5%)**, the opposite of
+  what `PLAN.md` expected. It is the OOV rate that has to explain the gap, not
+  the language: HDTB is newswire (2.8% OOV), EWT/GUM is web text (3.5%). The
+  test asserts the relationship, not a winner, so swapping either corpus again
+  cannot quietly invalidate the report.
 - **`hmm.smoothing_k = 0.01`, not 1.0.** Add-one puts more mass on the smoothing term than on the counts at this vocab size and drops the tagger below the most-frequent-tag baseline. Swept in notebook 04.
 - **`NEG_INF = -1e30`, not `-math.inf`.** NumPy warns on `inf - inf` inside the Viterbi max; a very negative finite number ranks identically.
 - **Linear-space Viterbi is implemented but unused.** It exists to demonstrate underflow (`Trellis.underflowed`) for the report.
@@ -85,6 +109,17 @@ These are documented in module docstrings and measured in `report/notes.md`. Do 
 
 ## Current state
 
-Phases 0–7 are done and the suite is green (594 passed, 1 skipped). Two things are stale: `notebooks/05_hmm_regional.ipynb` and the Phase 5 section of `report/notes.md` were never written (the Phase 5 code and tests are complete), and `data/models/hmm_hindi.pkl` was never built — so the tray's Hindi language toggle refuses and logs a warning. Phase 8 has not been started.
+Phases 0–7 are done and the suite is green (594 passed, 1 skipped). All four
+artefacts under `data/models/` are built from the post-swap corpora, including
+`hmm_hindi.pkl`, so the tray's Hindi toggle works. `report/notes.md` has the
+Phase 5 section and the corpus-swap before/after.
+
+Stale: `notebooks/05_hmm_regional.ipynb` was never written, and notebooks 01–04
+and 06 still contain the Brown-era tables — the numbers in `report/notes.md`
+are the current ones. Phase 9 has not been started.
+
+One known regression from the swap: `data/processed/modern.json` is 77 MB and
+the app loads it for the truecase map alone, which costs ~2.4 s of startup. A
+truecase-only artefact is the obvious fix and is not done.
 
 Phase 7's remaining manual step: run the tray app and confirm by hand that suggestions appear and accept in Notepad and in a browser without the caret moving. Everything else in that phase is measured in `report/notes.md`.

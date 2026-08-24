@@ -14,6 +14,11 @@ data/models/*
 data/processed/*
 !data/processed/.gitkeep
 
+# Downloaded corpora (scripts/fetch_data.py). 44 MB of fineweb-edu is not a
+# source file; the small hand-made sample_*.conll fixtures stay tracked.
+data/raw/modern_english.txt
+data/raw/ud_*.conll
+
 # Never commit anything derived from the user's own typing (Phase 3/7).
 user_profile.json
 *.log

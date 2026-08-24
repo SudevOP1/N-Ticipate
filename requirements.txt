@@ -8,6 +8,9 @@ pynput>=1.7          # global keystroke hook + injection
 pystray>=0.19        # system tray icon
 Pillow>=10.0         # tray icon rendering
 
+# --- corpus download (scripts/fetch_data.py) ---
+datasets>=2.19       # streams HuggingFaceFW/fineweb-edu; not imported by nticipate/
+
 # --- notebooks / deliverables ---
 jupyter>=1.0
 matplotlib>=3.8

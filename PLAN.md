@@ -54,7 +54,7 @@ of linear scan).
 | POS tagging with HMM (English)       | 4       |
 | HMM tagging, regional language       | 5       |
 | Application of the above (mini proj) | 3, 6, 7 |
-| Evaluation + report                  | 8       |
+| Evaluation + report                  | 9       |
 
 ## Stack
 
@@ -84,6 +84,9 @@ nticipate/
     injector.py           Phase 7  typing / pasting an accepted suggestion
     win32.py              Phase 7  ctypes: caret, window styles, clipboard
     editor.py             Phase 7  the fallback editor window
+scripts/
+  fetch_data.py           Phase 8  download + clean the corpora
+  retrain.py              Phase 8  rebuild every shipped artefact
 data/raw|processed|models
 notebooks/                01..06, one per phase deliverable
 tests/                    pytest, one module per source module
@@ -237,14 +240,109 @@ browser, without focus theft.
 
 **Built.** Six modules plus an entry point; measured numbers in
 `report/notes.md`. p95 prediction latency 5.4 ms against a 50 ms budget,
-keystroke savings 27.4% end to end. Caret positioning confirmed working in
+keystroke savings 27.4% end to end — both measured on the Brown-era model, so
+Phase 8 re-measures them on the retrained one. Caret positioning confirmed working in
 Notepad and confirmed unavailable in Chromium-class windows (mouse fallback).
 The overlay's `WS_EX_NOACTIVATE` / `WS_EX_TOOLWINDOW` / `WS_EX_TOPMOST` styles
 are asserted programmatically. The editor fallback was written anyway, because
 it is the demo that cannot fail. Outstanding: the by-hand check in Notepad and
 a browser with the hook actually running.
 
-## Phase 8 — Evaluation, packaging, report
+## Phase 8 — Corpus swap and retraining
+
+Not in the original plan. Phases 0–6 were built on NLTK Brown (1961 edited
+American prose, 1.16M tokens) with NLTK `treebank` / `indian` for the taggers,
+and every metric came back green. Typing at the Phase 7 app showed what the
+metrics could not: the suggestions were period-correct and unusable. `can you
+pl` ranked `place, play, plan` and had no `please` at any rank; `Internet` was
+not in the vocabulary at all.
+
+The failure is one of evaluation, not of code. Perplexity and hit@k measured
+on held-out text *from the same corpus* cannot see a domain mismatch, because
+the held-out text shares it. That is the finding this phase contributes to the
+report, and it is the argument for Phase 7 having been built at all: the app
+is what exposed it.
+
+This phase exists because Phase 7 shipped. It could not have been written
+earlier — nothing before Phase 7 was capable of showing the problem.
+
+**No module changes.** Only corpora, three config paths and the vocabulary /
+pruning thresholds moved.
+
+| Role            | Was                      | Now                                                    |
+| --------------- | ------------------------ | ------------------------------------------------------ |
+| Language model  | NLTK Brown               | `HuggingFaceFW/fineweb-edu` (`sample-10BT`, streamed) + `knkarthick/dialogsum` |
+| Tagged English  | NLTK `treebank` (WSJ)    | UD English-EWT + UD English-GUM                        |
+| Tagged Hindi    | NLTK `indian` (~10k tok) | UD Hindi-HDTB                                          |
+
+fineweb-edu is modern web prose already quality-filtered and deduplicated, so
+the cleaning left is line-level; dialogsum supplies the messenger register the
+app actually runs in. DailyDialog would have been the better-known choice but
+every Hub copy is script-based and `datasets` 5.x no longer executes loading
+scripts — same reason the tagged corpora come from the UD GitHub repos as
+`.conllu` rather than from the Hub's `universal_dependencies`.
+
+Two scripts, both outside `nticipate/` because nothing the app imports at
+runtime may depend on them: `scripts/fetch_data.py` downloads and cleans,
+`scripts/retrain.py` re-runs Phases 1, 2, 4 and 5 and writes every artefact.
+
+**Measured so far** (full tables in `report/notes.md`):
+
+| Metric                     |  Brown |  Modern |
+| -------------------------- | -----: | ------: |
+| Train tokens               |   927k |   6.73M |
+| OOV rate on dev            |  3.68% |   2.07% |
+| Next-word hit@1 / @3       | 16.7% / 29.0% | 19.2% / 32.1% |
+| Completion hit@1 (2 chars) |  40.2% |   46.0% |
+| Keystroke savings          |  40.4% |   42.7% |
+| p95 latency, completion    | 1.08 ms | 2.15 ms |
+| Hindi tagger               | never built | 94.72% (baseline 92.26%) |
+
+### Still to do
+
+1. **Point the Phase 7 app at the new artefacts and confirm it uses them.**
+   `config.yaml` already names them — `app.models.corpus` is
+   `data/processed/modern.json`, `app.models.ngram` is the retrained
+   `ngram_trigram_pruned.pkl`, and `app.models.tagger_hindi` now resolves to a
+   file that exists for the first time. `--check` reports all four present,
+   but the tray has not been run against them, so the end-to-end numbers in
+   `report/notes.md` for Phase 7 (p95 5.4 ms, keystroke savings 27.4%) are
+   still the Brown-era ones and `NticipateApp.warmup()` has never been timed
+   on a model 5.5x larger.
+2. **Re-derive every tunable that was swept on Brown.** `reranking.alpha =
+   0.1` was chosen on 400 held-out *Brown* sentences, `hmm.smoothing_k = 0.01`
+   on *treebank*, and the pruning pair (`min_count=2`,
+   `max_continuations=50`) on Brown's size-vs-perplexity curve. All three are
+   now unjustified numbers that happen to still be in the file.
+   `preprocessing.min_token_freq = 3` and `max_vocab_size = 80000` were set by
+   judgement during the swap and have never been swept at all.
+3. **Re-measure `typical_tag_agreement()`.** The 93% figure that justifies the
+   context-free candidate tag was measured on Brown + treebank. Phase 6's
+   central shortcut rests on it.
+4. **Re-run the Phase 2 and Phase 3 tables** — perplexity by order x
+   smoothing, the pruning trade-off, the personalisation ablation — on the new
+   corpus.
+5. **Regenerate the notebooks.** 01–04 and 06 still print Brown-era tables;
+   `05_hmm_regional.ipynb` was never written and now has a real Hindi model to
+   write about.
+6. **Fix the startup regression the swap introduced.** `data/processed/`
+   `modern.json` is 77 MB and the app loads it for the truecase map alone —
+   ~2.4 s of a ~3.1 s model load. A truecase-only artefact takes it back under
+   a second.
+7. **Delete `data/processed/brown.json`.** 29 MB, no longer read by anything.
+8. **Exercise the Hindi path end to end.** `hmm_hindi.pkl` exists for the
+   first time, so the tray's language toggle has never actually been run
+   against a model rather than against its own refusal branch.
+
+**Deliverables:** the before/after tables above, the re-swept parameter values
+with the curves that justify them, and the regenerated notebooks.
+
+**Done when:** the tray app runs on the retrained models with its latency and
+keystroke-savings numbers re-measured, every number in `report/notes.md` was
+produced by the current corpora, and no value in `config.yaml` is still
+justified by a Brown-era sweep.
+
+## Phase 9 — Evaluation, packaging, report
 
 Bundle with PyInstaller into a single `.exe` with the pruned model embedded.
 Final metrics table:
@@ -263,20 +361,31 @@ Final metrics table:
 ## Sequencing
 
 `0 → 1 → 2 → 3` first, so there is a working predictor with real numbers early.
-Then `4 → 5 → 6` for the POS-tagging coursework. Phase 7 last — it is the phase
+Then `4 → 5 → 6` for the POS-tagging coursework. Phase 7 next — it is the phase
 most likely to blow its estimate, and if the global hook doesn't pan out, the
 editor-window fallback still delivers every required NLP component.
 
+Phase 8 was not in the original plan. It exists because Phase 7 shipped: only
+a running app could show that the corpus, not the code, was the limit. Phase 9
+depends on 8 closing, since the final metrics table cannot be assembled from a
+mixture of Brown-era and current numbers.
+
 ## Status
 
-| Phase | Title                    | Status      |
-| ----- | ------------------------ | ----------- |
-| 0     | Scaffolding              | **done**    |
-| 1     | Preprocessing            | **done**    |
-| 2     | N-gram model             | **done**    |
-| 3     | Prediction engine        | **done**    |
-| 4     | HMM tagger, English      | **done**    |
-| 5     | HMM tagger, Hindi        | **done**    |
-| 6     | POS-aware reranking      | **done**    |
-| 7     | Desktop app              | **done**    |
-| 8     | Evaluation and packaging | not started |
+| Phase | Title                       | Status          |
+| ----- | --------------------------- | --------------- |
+| 0     | Scaffolding                 | **done**        |
+| 1     | Preprocessing               | **done**        |
+| 2     | N-gram model                | **done**        |
+| 3     | Prediction engine           | **done**        |
+| 4     | HMM tagger, English         | **done**        |
+| 5     | HMM tagger, Hindi           | **done**        |
+| 6     | POS-aware reranking         | **done**        |
+| 7     | Desktop app                 | **done**        |
+| 8     | Corpus swap and retraining  | **in progress** |
+| 9     | Evaluation and packaging    | not started     |
+
+Phase 7's one open item is the by-hand check in Notepad and a browser with the
+hook actually running. Phase 8's data swap, retraining and measurement are
+done; the eight items under "Still to do" in that section are what is open —
+the first of them is running Phase 7's app on the retrained models.

@@ -820,21 +820,29 @@ def test_the_devanagari_rules_earn_their_place_on_unseen_hindi_words():
     assert rows["suffix"]["unknown_accuracy"] > rows["uniform"]["unknown_accuracy"]
 
 
-def test_hindi_is_harder_than_english_because_more_of_it_is_unseen():
+def test_the_accuracy_gap_between_languages_tracks_the_oov_rate():
     """The second half of the Phase 5 criterion, as a test rather than a claim.
 
-    The gap has to be explained by a measured OOV rate rather than asserted, so
-    this pins the explanation down: Hindi scores lower *and* carries the higher
-    OOV rate and type-token ratio. Were Hindi ever to score lower at an equal
-    OOV rate, the report's explanation would be wrong and this would say so.
+    The gap has to be *explained* by a measured OOV rate rather than asserted,
+    so what is pinned down here is the relationship, not a winner: whichever
+    language leaves more of its held-out text unseen is the one that scores
+    lower, and it is the one with the higher type-token ratio. Were a language
+    ever to score lower at the *lower* OOV rate, the report's explanation would
+    be wrong and this would say so.
+
+    The direction was English-ahead on NLTK ``indian`` (~10k Hindi tokens) and
+    is Hindi-ahead on UD Hindi-HDTB (316k tokens, TTR 0.057) against UD
+    English-EWT/GUM (430k tokens, TTR 0.073). Both orderings satisfy this test,
+    which is the point: the corpus decides the direction, the OOV rate explains
+    it.
     """
     try:
         rows = {r["language"]: r for r in language_comparison()}
     except Exception:
         pytest.skip("tagged corpora not available -- run setup_env.py")
-    assert rows["hindi"]["accuracy"] < rows["english"]["accuracy"]
-    assert rows["hindi"]["oov_rate"] > rows["english"]["oov_rate"]
-    assert rows["hindi"]["ttr"] > rows["english"]["ttr"]
+    harder, easier = sorted(rows.values(), key=lambda r: r["oov_rate"], reverse=True)
+    assert harder["accuracy"] < easier["accuracy"]
+    assert harder["ttr"] > easier["ttr"]
 
 
 def test_language_comparison_carries_the_fitted_model_along():
