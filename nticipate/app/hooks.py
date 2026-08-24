@@ -45,6 +45,18 @@ NAVIGATION_KEYS = frozenset({
     "left", "right", "up", "down", "home", "end", "page_up", "page_down",
 })
 
+#: Windows key-down messages, as they reach a low-level keyboard hook. Only
+#: these two are looked at by the accept filter: swallowing the key-up of a
+#: suppressed key-down is unnecessary (no application saw the press) and
+#: swallowing key-ups in general strands modifier state in other processes.
+WM_KEYDOWN = 0x0100
+WM_SYSKEYDOWN = 0x0104
+
+#: Virtual key codes for the keys that can be configured as ``accept``. pynput
+#: knows these too, but only once it is imported, and the filter has to answer
+#: from inside the hook procedure where an import would be a bad idea.
+ACCEPT_VK_CODES = {"tab": 0x09, "enter": 0x0D, "return": 0x0D, "space": 0x20}
+
 #: Spellings people write in ``config.yaml`` mapped to every name pynput might
 #: report for the same physical key.
 KEY_ALIASES: dict[str, frozenset[str]] = {
@@ -476,11 +488,15 @@ class KeystrokeHook:
         router: KeyRouter | None = None,
         callbacks: HookCallbacks | None = None,
         policy: CapturePolicy | None = None,
+        suppress_accept: bool | None = None,
     ) -> None:
         self.router = router if router is not None else KeyRouter()
         self.callbacks = callbacks if callbacks is not None else HookCallbacks()
         self.policy = policy if policy is not None else CapturePolicy()
         self.enabled = True
+        self.suppress_accept = bool(
+            get("app.hotkeys.suppress_accept", True)
+        ) if suppress_accept is None else bool(suppress_accept)
         self._held: set[str] = set()
         self._listener = None
 
@@ -498,8 +514,13 @@ class KeystrokeHook:
     def start(self) -> "KeystrokeHook":
         from pynput import keyboard  # imported here: optional dependency
 
+        options = {}
+        if self.suppress_accept and self.accept_vk is not None:
+            # Ignored by pynput on any backend other than win32, which is the
+            # only one that can suppress a single key anyway.
+            options["win32_event_filter"] = self.win32_event_filter
         self._listener = keyboard.Listener(
-            on_press=self.on_press, on_release=self.on_release
+            on_press=self.on_press, on_release=self.on_release, **options
         )
         self._listener.daemon = True
         self._listener.start()
@@ -514,6 +535,72 @@ class KeystrokeHook:
     @property
     def running(self) -> bool:
         return self._listener is not None
+
+    # ----------------------------------------------------- accept suppression
+
+    @property
+    def accept_vk(self) -> int | None:
+        """Virtual key code of the configured accept key, or ``None``.
+
+        ``None`` means the key is one this module has no VK for, in which case
+        the accept still works -- it just also reaches the application, which
+        is the behaviour without the filter.
+        """
+        return ACCEPT_VK_CODES.get(self.router.accept)
+
+    def win32_event_filter(self, msg, data) -> bool:
+        """Swallow the accept key while a suggestion is on screen.
+
+        Without this, accepting a suggestion with Tab types the word *and*
+        leaves the Tab itself to reach the application, which indents the line
+        or moves focus out of the field. pynput cannot fix that from
+        :meth:`on_press`: on Windows the listener callbacks run on a message
+        loop that the low-level hook posts to, long after the hook procedure
+        has already told Windows to pass the key along. This filter is the one
+        callback that runs *inside* the hook procedure, so it is the only place
+        a single event can still be stopped -- which means the decision to
+        swallow Tab and the accept it stands for both have to be made here.
+
+        Two constraints shape the body. The hook procedure must return quickly,
+        because Windows silently unhooks a callback that overruns
+        ``LowLevelHooksTimeout`` (~300 ms by default), and the accept types
+        text through pynput, which must not run inside the hook it would
+        re-enter. So the routing -- which is pure state, and must be
+        synchronous, or a second Tab would see ``suggesting`` still true --
+        happens here, and only the callback is handed to a worker thread.
+
+        Returning ``True`` leaves the event completely alone: it reaches the
+        application and, through the message loop, :meth:`on_press`.
+        """
+        if msg not in (WM_KEYDOWN, WM_SYSKEYDOWN):
+            return True
+        if getattr(data, "vkCode", None) != self.accept_vk:
+            return True
+        # Ctrl+Tab and Alt+Tab belong to the window manager, never to us.
+        if self._held or not self.enabled or not self.router.suggesting:
+            return True
+        if self.policy.blocked():
+            return True
+        action = self.router.route(KeyEvent(name=self.router.accept))
+        if action is Action.ACCEPT:
+            # Normally the app clears this when it hides the overlay, but that
+            # now happens on the worker thread: a second Tab arriving in the
+            # meantime would be suppressed and accepted twice. The suggestion
+            # is spoken for the moment it is routed.
+            self.router.suggesting = False
+        self._dispatch_async(action)
+        self._listener.suppress_event()  # raises; nothing below runs
+        return False
+
+    def _dispatch_async(self, action: "Action") -> None:
+        """Run a callback off the hook thread.
+
+        One thread per accept, which is a keypress the user made deliberately
+        -- not per keystroke.
+        """
+        threading.Thread(
+            target=self.callbacks.dispatch, args=(action,), daemon=True
+        ).start()
 
     # --------------------------------------------------------------- events
 

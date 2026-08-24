@@ -83,6 +83,7 @@ def model_paths() -> dict[str, Path | None]:
     return {
         "ngram": maybe("app.models.ngram", "data/models/ngram_trigram_pruned.pkl"),
         "corpus": maybe("app.models.corpus", "data/processed/brown.json"),
+        "truecase": maybe("app.models.truecase", "data/models/truecase.json"),
         "tagger": maybe("app.models.tagger", "data/models/hmm_english.pkl"),
         "tagger_hindi": maybe("app.models.tagger_hindi", "data/models/hmm_hindi.pkl"),
         "profile": resolve_path(get("paths.user_profile", "data/models/user_profile.json")),
@@ -107,11 +108,23 @@ def load_predictor(language: str | None = None) -> Predictor:
             language,
         )
     profile_path = paths["profile"] if paths["profile"].exists() else None
+    # The truecase map is all the corpus is ever read for. Prefer the small
+    # artefact; fall back to the full corpus only when it has not been built.
+    truecase_path = paths["truecase"]
+    corpus_path = None if truecase_path is not None else paths["corpus"]
+    if truecase_path is None and corpus_path is not None:
+        log.warning(
+            "No truecase artefact; loading %s for its map alone. Run "
+            "scripts/retrain.py (or Corpus.save_truecase) to build "
+            "data/models/truecase.json.",
+            corpus_path.name,
+        )
     return Predictor.from_paths(
         paths["ngram"],
-        corpus_path=paths["corpus"],
+        corpus_path=corpus_path,
         profile_path=profile_path,
         tagger_path=tagger_path,
+        truecase_path=truecase_path,
     )
 
 

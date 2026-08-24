@@ -3,6 +3,7 @@
 Runs Phases 1, 2, 4 and 5 end to end and writes:
 
     data/processed/modern.json          Corpus  (splits, vocab, truecase map)
+    data/models/truecase.json           truecase map alone (what the app loads)
     data/models/ngram_trigram_pruned.pkl
     data/models/hmm_english.pkl
     data/models/hmm_hindi.pkl
@@ -55,6 +56,9 @@ def build_lm(limit: int | None) -> None:
           f"TTR {stats['type_token_ratio']:.4f}")
     print(f"    OOV on dev {pre.oov_rate(corpus.dev, corpus.vocab) * 100:.2f}%")
     saved = corpus.save(corpus_path)
+    print(f"    -> {saved}  ({saved.stat().st_size / 1e6:.1f} MB)")
+    truecase_path = get("app.models.truecase", "data/models/truecase.json")
+    saved = corpus.save_truecase(truecase_path)
     print(f"    -> {saved}  ({saved.stat().st_size / 1e6:.1f} MB)")
 
     print(f"[2] n-gram  order={get('ngram.max_order')} "

@@ -22,7 +22,9 @@ import pytest
 
 from nticipate.app import win32
 from nticipate.app.hooks import (
+    ACCEPT_VK_CODES,
     DEFAULT_SENTENCE_END,
+    WM_KEYDOWN,
     Action,
     CapturePolicy,
     ContextBuffer,
@@ -405,6 +407,99 @@ def test_modifier_press_and_release_is_tracked(open_hook):
     open_hook.on_release(Ctrl())
     open_hook.on_press(type("K", (), {"char": "c"})())
     assert open_hook.router.buffer.text == "c"
+
+
+# ------------------------------------------------- accept-key suppression
+
+class _FakeListener:
+    """Stands in for the pynput listener: records the suppression call."""
+
+    class SuppressException(Exception):
+        pass
+
+    def __init__(self) -> None:
+        self.suppressed = 0
+
+    def suppress_event(self):
+        self.suppressed += 1
+        raise self.SuppressException()
+
+
+def _keydown(vk: int):
+    return type("Data", (), {"vkCode": vk})()
+
+
+def _suppressing_hook(open_hook):
+    open_hook._listener = _FakeListener()
+    return open_hook
+
+
+def test_the_accept_key_is_swallowed_while_suggesting(open_hook):
+    hook = _suppressing_hook(open_hook)
+    accepted: list[str] = []
+    hook.callbacks = HookCallbacks(on_accept=lambda: accepted.append("accept"))
+    hook.router.suggesting = True
+
+    with pytest.raises(_FakeListener.SuppressException):
+        hook.win32_event_filter(WM_KEYDOWN, _keydown(ACCEPT_VK_CODES["tab"]))
+
+    assert hook._listener.suppressed == 1
+    # The accept itself is dispatched off the hook thread.
+    deadline = time.time() + 1.0
+    while not accepted and time.time() < deadline:
+        time.sleep(0.005)
+    assert accepted == ["accept"]
+
+
+def test_a_plain_tab_is_left_alone(open_hook):
+    hook = _suppressing_hook(open_hook)
+    hook.router.suggesting = False
+    assert hook.win32_event_filter(WM_KEYDOWN, _keydown(ACCEPT_VK_CODES["tab"])) is True
+    assert hook._listener.suppressed == 0
+
+
+def test_ctrl_tab_is_left_alone(open_hook):
+    hook = _suppressing_hook(open_hook)
+    hook.router.suggesting = True
+    hook._held.add("ctrl")
+    assert hook.win32_event_filter(WM_KEYDOWN, _keydown(ACCEPT_VK_CODES["tab"])) is True
+    assert hook._listener.suppressed == 0
+
+
+def test_other_keys_and_key_ups_are_left_alone(open_hook):
+    hook = _suppressing_hook(open_hook)
+    hook.router.suggesting = True
+    assert hook.win32_event_filter(WM_KEYDOWN, _keydown(0x41)) is True   # "a"
+    assert hook.win32_event_filter(0x0101, _keydown(ACCEPT_VK_CODES["tab"])) is True
+    assert hook._listener.suppressed == 0
+
+
+def test_a_blocked_field_never_suppresses(open_hook, monkeypatch):
+    hook = _suppressing_hook(open_hook)
+    hook.router.suggesting = True
+    monkeypatch.setattr(win32, "is_password_field", lambda: True)
+    assert hook.win32_event_filter(WM_KEYDOWN, _keydown(ACCEPT_VK_CODES["tab"])) is True
+    assert hook._listener.suppressed == 0
+
+
+def test_suppression_clears_suggesting_synchronously(open_hook):
+    # A second Tab must behave like a plain Tab, so the routing cannot wait
+    # for the worker thread.
+    hook = _suppressing_hook(open_hook)
+    hook.router.suggesting = True
+    with pytest.raises(_FakeListener.SuppressException):
+        hook.win32_event_filter(WM_KEYDOWN, _keydown(ACCEPT_VK_CODES["tab"]))
+    assert hook.router.suggesting is False
+
+
+def test_suppression_can_be_configured_off():
+    assert KeystrokeHook(suppress_accept=False).suppress_accept is False
+    assert KeystrokeHook(suppress_accept=True).suppress_accept is True
+
+
+def test_accept_vk_is_none_for_an_unmapped_key():
+    hook = KeystrokeHook(router=KeyRouter(accept="f5"))
+    assert hook.accept_vk is None
 
 
 def test_hook_reports_pynput_availability():

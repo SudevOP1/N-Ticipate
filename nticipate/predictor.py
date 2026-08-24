@@ -185,12 +185,23 @@ class Predictor:
         corpus_path: str | Path | None = None,
         profile_path: str | Path | None = None,
         tagger_path: str | Path | None = None,
+        truecase_path: str | Path | None = None,
         **kwargs,
     ) -> "Predictor":
-        """Load a shipped model, its truecase map, the profile and the tagger."""
+        """Load a shipped model, its truecase map, the profile and the tagger.
+
+        ``truecase_path`` is the cheap way in: a map written by
+        :meth:`Corpus.save_truecase`, a few MB. ``corpus_path`` is the fallback
+        for callers that only have the full corpus, and parses the splits and
+        the vocab the predictor then throws away.
+        """
         model = NgramModel.load(model_path)
         truecase: dict[str, str] = {}
-        if corpus_path is not None:
+        if truecase_path is not None:
+            from nticipate.preprocess import load_truecase_map
+
+            truecase = load_truecase_map(truecase_path)
+        elif corpus_path is not None:
             from nticipate.preprocess import Corpus
 
             truecase = Corpus.load(corpus_path).truecase

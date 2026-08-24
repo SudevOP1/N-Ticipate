@@ -150,9 +150,21 @@ all.
 ### Cost paid
 
 Startup grew: `Corpus.load()` on a 77.1 MB JSON is ~2.4 s of the app's ~3.1 s
-model load. The app reads that file for the truecase map alone. A truecase-only
-artefact would take it back under a second and is the obvious next
-optimisation; it is not done yet.
+model load. The app reads that file for the truecase map alone.
+
+**Fixed** (truecase-only artefact). `Corpus.save_truecase()` writes the map on
+its own to `data/models/truecase.json`; `load_predictor()` prefers it and falls
+back to the corpus only when it is missing.
+
+| Source of the truecase map | Size | Parse | Full `load_predictor()` |
+| --- | --- | --- | --- |
+| `data/processed/modern.json` | 77.1 MB | 9.0 s cold | `MemoryError` |
+| `data/models/truecase.json` | 3.9 MB | 0.08 s | 1.69 s |
+
+The `MemoryError` is not a footnote: with the 12.5 MB n-gram pickle and both
+taggers already resident, decoding the 77 MB file exhausted the heap and the
+app would not start at all. The two maps compare equal (153,955 entries), so
+the suggestion surface forms are unchanged.
 
 ## Phase 1 — Preprocessing
 
@@ -941,6 +953,32 @@ Verified programmatically: after `show()` the overlay is mapped
 Notepad and in a browser with the tray app running, confirming the caret never
 moves — is the phase's remaining manual step.
 
+### Accepting typed the word *and* a Tab
+
+Found by hand-testing the tray app: Tab accepted the suggestion and then
+indented the line — `word` came out as `word    `. Not an injector bug. pynput's
+`on_press` is not where the key can be stopped on Windows: the low-level hook
+procedure posts the event to the listener's message loop and returns, and it is
+that return value which tells Windows whether to pass the key on. By the time a
+callback runs, the application already has the Tab.
+
+The one callback that runs *inside* the hook procedure is `win32_event_filter`,
+so `KeystrokeHook.win32_event_filter()` is where the accept now lives:
+
+| Constraint | Consequence in the filter |
+| --- | --- |
+| Only this callback can suppress | The accept has to be *routed* here, not in `on_press` |
+| Hook must return before `LowLevelHooksTimeout` (~300 ms) | Callback dispatched to a worker thread |
+| Injection re-enters the hook | Same — typing must not happen on the hook thread |
+| A second Tab must be an ordinary Tab | `router.suggesting` cleared synchronously, before the worker runs |
+
+It fires only for the accept key's key-down, with no modifier held, with the
+overlay up and with capture unblocked; anything else returns `True` and is left
+completely alone, so a plain Tab still indents and Alt+Tab still switches
+windows. `app.hotkeys.suppress_accept` turns it off. The Tk editor fallback
+never had the bug — it already returned `"break"` from its `<Tab>` binding,
+which is the same rule expressed in the one place Tk offers it.
+
 ### Privacy
 
 The plan's hard requirements, and how each is enforced rather than configured:
@@ -979,9 +1017,9 @@ POS tag, which the overlay does not.
 
 Artefacts: no new model files. New config keys: `app.models.*`,
 `app.capture.{append_space, max_buffer_chars, sentence_end_chars}`,
-`app.learning.{enabled, autosave_every}`.
+`app.learning.{enabled, autosave_every}`, `app.hotkeys.suppress_accept`.
 
-Tests: 594 passing, 1 skipped (113 new, `tests/test_app.py` plus config-key
+Tests: 609 passing, 1 skipped (113 new, `tests/test_app.py` plus config-key
 assertions in `test_phase0_setup.py`). No notebook — Phase 7's deliverable is
 the running app, and the numbers above come from a replay harness rather than
 from a per-phase notebook.

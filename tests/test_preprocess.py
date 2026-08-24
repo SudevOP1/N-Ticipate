@@ -16,6 +16,7 @@ from nticipate.preprocess import (
     coverage_curve,
     frequency_table,
     load_corpus_sentences,
+    load_truecase_map,
     oov_rate,
     pad_sentence,
     preprocess_corpus,
@@ -326,6 +327,25 @@ def test_corpus_save_load_round_trip(tmp_path):
     assert restored.test == corpus.test
     assert restored.vocab.tokens == corpus.vocab.tokens
     assert restored.truecase == corpus.truecase
+
+
+def test_save_truecase_writes_only_the_map(tmp_path):
+    corpus = preprocess_corpus(SAMPLE * 5)
+    path = corpus.save_truecase(tmp_path / "truecase.json")
+    assert load_truecase_map(path) == corpus.truecase
+    assert path.stat().st_size < corpus.save(tmp_path / "corpus.json").stat().st_size
+
+
+def test_load_truecase_map_accepts_a_full_corpus_file(tmp_path):
+    corpus = preprocess_corpus(SAMPLE * 5)
+    path = corpus.save(tmp_path / "corpus.json")
+    assert load_truecase_map(path) == corpus.truecase
+
+
+def test_save_truecase_preserves_devanagari(tmp_path):
+    corpus = preprocess_corpus(HINDI * 5, min_sentence_tokens=1)
+    path = corpus.save_truecase(tmp_path / "hi_truecase.json")
+    assert load_truecase_map(path) == corpus.truecase
 
 
 def test_corpus_save_preserves_devanagari(tmp_path):

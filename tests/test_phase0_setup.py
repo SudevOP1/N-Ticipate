@@ -99,9 +99,11 @@ REQUIRED_KEYS = [
     "reranking.unknown_tag_penalty",
     # Phase 7
     "app.enabled_on_start", "app.language",
-    "app.models.ngram", "app.models.corpus", "app.models.tagger",
+    "app.models.ngram", "app.models.corpus", "app.models.truecase",
+    "app.models.tagger",
     "app.models.tagger_hindi",
     "app.hotkeys.accept", "app.hotkeys.dismiss", "app.hotkeys.toggle",
+    "app.hotkeys.suppress_accept",
     "app.overlay.max_items", "app.overlay.font_size", "app.overlay.theme",
     "app.overlay.offset_x", "app.overlay.offset_y",
     "app.capture.context_reset_keys", "app.capture.max_context_words",

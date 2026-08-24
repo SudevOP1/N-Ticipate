@@ -31,7 +31,7 @@ def check() -> int:
     print("\nModels")
     paths = model_paths()
     missing = 0
-    for name in ("ngram", "corpus", "tagger", "tagger_hindi"):
+    for name in ("ngram", "truecase", "corpus", "tagger", "tagger_hindi"):
         path = paths[name]
         if path is None:
             print(f"  [MISS] {name:<12} not built")

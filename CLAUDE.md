@@ -98,6 +98,7 @@ These are documented in module docstrings and measured in `report/notes.md`. Do 
 - **Reranking scores are logs; Phase 3 scores are probabilities.** `predict()` switches representation when the POS term is live. The ranking is unaffected at `alpha = 0` (the log is monotonic) and a test asserts it.
 - **The candidate's tag is guessed context-free.** Tagging each candidate in context would cost one Viterbi decode per candidate per keystroke. The shortcut agrees with the in-context tag 93% of the time — measured, not assumed, by `typical_tag_agreement()`.
 - **The Phase 7 caret query returning `None` is the normal case, not a failure.** `GetGUIThreadInfo` answers for classic Win32 controls and tells browsers and Electron nothing, so `win32.caret_rect()` returns `None` and the overlay anchors to the mouse. The opaque window classes are listed explicitly so the API's stale rectangle is never trusted.
+- **Tab is suppressed from inside the hook procedure, not from `on_press`.** `KeystrokeHook.win32_event_filter()` exists because pynput's listener callbacks run on a message loop the low-level hook posts to — by the time `on_press` sees Tab, Windows has already passed the key to the application, which indents the line on top of the word just typed. The filter is the only callback that runs inside the hook procedure, so it routes the accept itself, hands the callback to a worker thread (the hook procedure must return before `LowLevelHooksTimeout`, and injection must not re-enter the hook) and clears `router.suggesting` synchronously so a second Tab is an ordinary Tab. It never fires unless the overlay is up. The Tk editor fallback has the same rule as `return "break"`.
 - **Learning is off by default (`app.learning.enabled: false`).** It is the one feature that writes what the user typed to disk, and Phase 7's privacy rule says the context buffer never reaches disk. Both hold only if learning is opt-in from the tray menu — and even then what is saved is the profile's n-gram counts, not the keystroke stream.
 - **`ContextBuffer` has no `save`/`to_dict` and its `__repr__` prints lengths.** Privacy is structural here rather than a setting that is checked; tests assert both.
 - **`NticipateApp.warmup()` is not a micro-optimisation.** The first prediction is ~360 ms (NLTK tokenizer load + the model's lazy index) against ~1.4 ms steady state. Without it the app appears to miss its latency budget by 10× on the first keystroke.
@@ -109,7 +110,7 @@ These are documented in module docstrings and measured in `report/notes.md`. Do 
 
 ## Current state
 
-Phases 0–7 are done and the suite is green (594 passed, 1 skipped). All four
+Phases 0–7 are done and the suite is green (609 passed, 1 skipped). All four
 artefacts under `data/models/` are built from the post-swap corpora, including
 `hmm_hindi.pkl`, so the tray's Hindi toggle works. `report/notes.md` has the
 Phase 5 section and the corpus-swap before/after.
@@ -118,8 +119,11 @@ Stale: `notebooks/05_hmm_regional.ipynb` was never written, and notebooks 01–0
 and 06 still contain the Brown-era tables — the numbers in `report/notes.md`
 are the current ones. Phase 9 has not been started.
 
-One known regression from the swap: `data/processed/modern.json` is 77 MB and
-the app loads it for the truecase map alone, which costs ~2.4 s of startup. A
-truecase-only artefact is the obvious fix and is not done.
+The 77 MB `data/processed/modern.json` is no longer on the start-up path: the
+truecase map ships on its own as `data/models/truecase.json` (3.9 MB, written by
+`Corpus.save_truecase()` and by `scripts/retrain.py`). `app.models.corpus` is
+kept only as the fallback for a checkout where that file has not been built.
+Loading the corpus for the map alone raised `MemoryError` once the n-gram model
+was resident; before/after is under "Cost paid" in `report/notes.md`.
 
 Phase 7's remaining manual step: run the tray app and confirm by hand that suggestions appear and accept in Notepad and in a browser without the caret moving. Everything else in that phase is measured in `report/notes.md`.

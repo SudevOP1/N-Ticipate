@@ -643,6 +643,35 @@ def test_from_paths_loads_the_tagger(tmp_path):
     assert predictor.typical_tag("report") == "NOUN"
 
 
+def test_from_paths_reads_a_truecase_only_artefact(tmp_path):
+    from nticipate.preprocess import preprocess_corpus
+
+    corpus = preprocess_corpus("India is here. India is there. India again.",
+                               min_sentence_tokens=1)
+    truecase_path = corpus.save_truecase(tmp_path / "truecase.json")
+    model = NgramModel(order=3, smoothing="stupid_backoff").fit(TRAIN)
+    model_path = model.save(tmp_path / "model.pkl")
+
+    predictor = Predictor.from_paths(model_path, truecase_path=truecase_path)
+    assert predictor.truecase == corpus.truecase
+
+
+def test_from_paths_prefers_the_truecase_artefact_over_the_corpus(tmp_path):
+    from nticipate.preprocess import Corpus, Vocab
+
+    corpus = Corpus(train=[], dev=[], test=[], vocab=Vocab({"x"}),
+                    truecase={"x": "CORPUS"})
+    corpus_path = corpus.save(tmp_path / "corpus.json")
+    truecase_path = tmp_path / "truecase.json"
+    truecase_path.write_text('{"x": "ARTEFACT"}', encoding="utf-8")
+    model_path = NgramModel(order=3, smoothing="stupid_backoff").fit(TRAIN).save(
+        tmp_path / "model.pkl")
+
+    predictor = Predictor.from_paths(model_path, corpus_path=corpus_path,
+                                     truecase_path=truecase_path)
+    assert predictor.truecase == {"x": "ARTEFACT"}
+
+
 def test_reranking_survives_a_tagger_round_trip(tmp_path):
     path = make_tagger().save(tmp_path / "tagger.pkl")
     loaded = make_reranking_predictor(tagger=HMMTagger.load(path))

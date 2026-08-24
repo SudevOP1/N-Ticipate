@@ -166,16 +166,27 @@ app:
 
   # Artefacts the app loads at start-up. Only the n-gram model is required --
   # with no tagger the predictor is exactly Phase 3, which is a working app.
-  # The corpus is loaded for its truecase map alone, so the overlay can show
-  # "India" rather than the lowercased form the counts are kept in.
+  # The truecase map is what lets the overlay show "India" rather than the
+  # lowercased form the counts are kept in. It ships on its own (a few MB)
+  # because the corpus it came from is 77 MB of sentences the app never reads:
+  # parsing those cost ~2.4 s of start-up and, with the n-gram model already
+  # resident, enough memory to raise MemoryError. `corpus` stays as the
+  # fallback for a checkout where retrain.py has not written the small file.
   models:
     ngram: data/models/ngram_trigram_pruned.pkl
+    truecase: data/models/truecase.json
     corpus: data/processed/modern.json
     tagger: data/models/hmm_english.pkl
     tagger_hindi: data/models/hmm_hindi.pkl
 
   hotkeys:
     accept: tab
+    # Stop the accept key itself from reaching the application once it has
+    # been used to take a suggestion -- otherwise accepting types the word and
+    # then a Tab, which indents the line or moves focus out of the field.
+    # Windows-only: it works by suppressing the key inside the low-level hook,
+    # and it never fires unless the overlay is up, so a plain Tab is untouched.
+    suppress_accept: true
     dismiss: esc
     toggle: "<ctrl>+<alt>+n"
 

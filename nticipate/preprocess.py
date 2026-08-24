@@ -458,6 +458,20 @@ class Corpus:
             json.dump(payload, fh, ensure_ascii=False)
         return target
 
+    def save_truecase(self, path: str | Path) -> Path:
+        """Write the truecase map on its own, without the splits or the vocab.
+
+        The running app loads the corpus for this map and nothing else, and the
+        full artefact is ~77 MB of sentences it never reads. Parsing it costs
+        seconds of start-up and, once the n-gram model is already resident,
+        enough memory to raise ``MemoryError`` on a 32-bit-ish heap. The map is
+        a few MB, so it ships separately.
+        """
+        target = resolve_path(path, create=True)
+        with target.open("w", encoding="utf-8") as fh:
+            json.dump(self.truecase, fh, ensure_ascii=False)
+        return target
+
     @classmethod
     def load(cls, path: str | Path) -> "Corpus":
         source = resolve_path(path)
@@ -470,6 +484,21 @@ class Corpus:
             vocab=Vocab.from_dict(data["vocab"]),
             truecase=data["truecase"],
         )
+
+
+def load_truecase_map(path: str | Path) -> dict[str, str]:
+    """Read a map written by :meth:`Corpus.save_truecase`.
+
+    A full :class:`Corpus` file also parses here -- the ``"truecase"`` key is
+    picked out -- so a caller pointed at the old artefact still works, just
+    slowly.
+    """
+    source = resolve_path(path)
+    with source.open("r", encoding="utf-8") as fh:
+        data = json.load(fh)
+    if isinstance(data, dict) and "truecase" in data and "vocab" in data:
+        return data["truecase"]
+    return data
 
 
 def preprocess_sentences(sentences: Iterable[Sentence], **overrides) -> Corpus:
