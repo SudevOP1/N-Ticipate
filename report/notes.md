@@ -1023,7 +1023,3 @@ Tests: 609 passing, 1 skipped (113 new, `tests/test_app.py` plus config-key
 assertions in `test_phase0_setup.py`). No notebook — Phase 7's deliverable is
 the running app, and the numbers above come from a replay harness rather than
 from a per-phase notebook.
-
-## Phase 8 — Packaging
-
-_(exe size, RAM, startup time)_

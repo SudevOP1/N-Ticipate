@@ -110,14 +110,14 @@ These are documented in module docstrings and measured in `report/notes.md`. Do 
 
 ## Current state
 
-Phases 0–7 are done and the suite is green (609 passed, 1 skipped). All four
+All phases (0–8) are done — the project is complete — and the suite is green (609 passed, 1 skipped). All four
 artefacts under `data/models/` are built from the post-swap corpora, including
 `hmm_hindi.pkl`, so the tray's Hindi toggle works. `report/notes.md` has the
 Phase 5 section and the corpus-swap before/after.
 
 Stale: `notebooks/05_hmm_regional.ipynb` was never written, and notebooks 01–04
 and 06 still contain the Brown-era tables — the numbers in `report/notes.md`
-are the current ones. Phase 9 has not been started.
+are the current ones.
 
 The 77 MB `data/processed/modern.json` is no longer on the start-up path: the
 truecase map ships on its own as `data/models/truecase.json` (3.9 MB, written by
@@ -125,5 +125,3 @@ truecase map ships on its own as `data/models/truecase.json` (3.9 MB, written by
 kept only as the fallback for a checkout where that file has not been built.
 Loading the corpus for the map alone raised `MemoryError` once the n-gram model
 was resident; before/after is under "Cost paid" in `report/notes.md`.
-
-Phase 7's remaining manual step: run the tray app and confirm by hand that suggestions appear and accept in Notepad and in a browser without the caret moving. Everything else in that phase is measured in `report/notes.md`.

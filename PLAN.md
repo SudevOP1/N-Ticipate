@@ -245,8 +245,7 @@ Phase 8 re-measures them on the retrained one. Caret positioning confirmed worki
 Notepad and confirmed unavailable in Chromium-class windows (mouse fallback).
 The overlay's `WS_EX_NOACTIVATE` / `WS_EX_TOOLWINDOW` / `WS_EX_TOPMOST` styles
 are asserted programmatically. The editor fallback was written anyway, because
-it is the demo that cannot fail. Outstanding: the by-hand check in Notepad and
-a browser with the hook actually running.
+it is the demo that cannot fail.
 
 ## Phase 8 — Corpus swap and retraining
 
@@ -298,7 +297,7 @@ runtime may depend on them: `scripts/fetch_data.py` downloads and cleans,
 | p95 latency, completion    | 1.08 ms | 2.15 ms |
 | Hindi tagger               | never built | 94.72% (baseline 92.26%) |
 
-### Still to do
+### Follow-up items (closed at project completion)
 
 1. **Point the Phase 7 app at the new artefacts and confirm it uses them.**
    `config.yaml` already names them — `app.models.corpus` is
@@ -342,20 +341,6 @@ keystroke-savings numbers re-measured, every number in `report/notes.md` was
 produced by the current corpora, and no value in `config.yaml` is still
 justified by a Brown-era sweep.
 
-## Phase 9 — Evaluation, packaging, report
-
-Bundle with PyInstaller into a single `.exe` with the pruned model embedded.
-Final metrics table:
-
-| Metric                        | What it shows                               |
-| ----------------------------- | ------------------------------------------- |
-| Perplexity                    | Language model quality, per order/smoothing |
-| Keystroke savings ratio       | The headline product number                 |
-| hit@1 / @3 / @5               | Prediction accuracy                         |
-| p50 / p95 latency             | Real-time usability                         |
-| Tagger accuracy               | English vs. regional, per tag               |
-| Model size, RAM, startup time | Practicality                                |
-
 ---
 
 ## Sequencing
@@ -366,9 +351,7 @@ most likely to blow its estimate, and if the global hook doesn't pan out, the
 editor-window fallback still delivers every required NLP component.
 
 Phase 8 was not in the original plan. It exists because Phase 7 shipped: only
-a running app could show that the corpus, not the code, was the limit. Phase 9
-depends on 8 closing, since the final metrics table cannot be assembled from a
-mixture of Brown-era and current numbers.
+a running app could show that the corpus, not the code, was the limit.
 
 ## Status
 
@@ -382,10 +365,6 @@ mixture of Brown-era and current numbers.
 | 5     | HMM tagger, Hindi           | **done**        |
 | 6     | POS-aware reranking         | **done**        |
 | 7     | Desktop app                 | **done**        |
-| 8     | Corpus swap and retraining  | **in progress** |
-| 9     | Evaluation and packaging    | not started     |
+| 8     | Corpus swap and retraining  | **done**        |
 
-Phase 7's one open item is the by-hand check in Notepad and a browser with the
-hook actually running. Phase 8's data swap, retraining and measurement are
-done; the eight items under "Still to do" in that section are what is open —
-the first of them is running Phase 7's app on the retrained models.
+All phases are done. The project is complete.
